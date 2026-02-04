@@ -1,5 +1,5 @@
-TTelegramBot class must have wrapper for callbacks. You can use TTelegramBotEx class instead of creating a new one.
-
+### TTelegramBot class must have wrapper for callbacks. You can use TTelegramBotEx class instead of creating a new one.
+```
 vBot := TTelegramBotEx.Create('BOT_TOKEN');
 vBot.Initialize;
 vBot.RegisterDoOnCallbackQuery(
@@ -20,3 +20,4 @@ vBot.RegisterDoOnMessage(
 repeat
   vBot.Poll; // Receives one update. To keep receiving updates, you need to overwrite StartPolling, in which your thread will pull updates.
 until false;
+```
