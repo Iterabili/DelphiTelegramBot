@@ -173,8 +173,8 @@ begin
 end;
 
 constructor TTelegramBot.Create(const AToken: string);
-var
-  vLogName: string;
+//var
+//  vLogName: string;
 begin
   BotToken := AToken;
   FLastUpdate := 0;
@@ -199,7 +199,7 @@ begin
 //  else
 //    FLog := TFileStream.Create(vLogName, fmCreate or fmOpenWrite or fmShareDenyNone);
 
-  FLog.Position := FLog.Size;
+//  FLog.Position := FLog.Size;
 end;
 
 procedure TTelegramBot.DeleteKeyboard(const AMessage: TTelegramMessage);
@@ -649,8 +649,8 @@ begin
         begin
           Result := TJSONObject(vUpdate.Clone);
 {$IFDEF DEBUG}
-          vRes := Result.ToString;
-          FLog.Write(vRes[1], Length(vRes)*2);
+//          vRes := Result.ToString;
+//          FLog.Write(vRes[1], Length(vRes)*2);
 {$ENDIF}
           FLastUpdate := Result.ExtractInteger('update_id') + 1;
         end;
