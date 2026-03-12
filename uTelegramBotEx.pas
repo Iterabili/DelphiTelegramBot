@@ -105,6 +105,25 @@ type
     function DoOnMessage(const AMessage: TTelegramMessage): Boolean; override;
     function DoOnCallbackQuery(const ACallbackQuery: TTelegramCallbackQuery): Boolean; override;
 
+    procedure SendCommandsToTelegram;
+
+    procedure DoInitialize; virtual;
+
+    procedure ExecuteAction(const AName: string; const AParams: TCallbackData; const ACallBack: TTelegramCallbackQuery); virtual; abstract;
+
+    function ProceedNextStep(const AMsg: TTelegramMessage): Boolean;
+  public
+    constructor Create(const AToken: string); override;
+    destructor Destroy; override;
+
+    procedure Initialize;
+
+    procedure RegisterDoOnMessage(const AFunction: TOnTelegramMessage);
+    procedure RegisterDoOnCallbackQuery(const AFunction: TOnTelegramCallbackQuery);
+
+    procedure DeleteNextStep(const ATelegramId: string);
+    procedure ClearNextSteps;
+
     procedure RegisterNextStep(const AChatId: string; const AProcedure: TNextStepFunction; const AObject: TObject = nil);
     procedure RegisterAction(const AName: string);
     procedure RegisterButton(const AName: string; const ACaption: string; const AURL: string = '');
@@ -112,8 +131,6 @@ type
 
     procedure RegisterMenu(const AMenuName, ACaption: string; const AButtons: TButtons; const ABackButton: string = ''); overload;
     procedure RegisterMenu(const AMenuName: string; const AConstructProcedure: TConstructSimpleMenuProcedure); overload;
-
-    procedure SendCommandsToTelegram;
 
    // Value getters
     procedure GetInteger    (const AMessage: TTelegramMessage; const AFrom, ACaption: string; const AProc: TIntegerProc;
@@ -151,23 +168,6 @@ type
     function AppendMenuKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton, ATelegramId, AData: string; const ACaption: string = ''; const ARow: Integer = -1): Boolean; overload;
     //todo: add captions
     procedure SendConfirmation(const AMessage: TTelegramMessage; const ATelegramId, AText, AAction, AData: string; const APhoto: string = ''; const ADocument: string = '');
-
-    procedure DoInitialize; virtual;
-
-    procedure ExecuteAction(const AName: string; const AParams: TCallbackData; const ACallBack: TTelegramCallbackQuery); virtual; abstract;
-
-    function ProceedNextStep(const AMsg: TTelegramMessage): Boolean;
-  public
-    constructor Create(const AToken: string); override;
-    destructor Destroy; override;
-
-    procedure Initialize;
-
-    procedure RegisterDoOnMessage(const AFunction: TOnTelegramMessage);
-    procedure RegisterDoOnCallbackQuery(const AFunction: TOnTelegramCallbackQuery);
-
-    procedure DeleteNextStep(const ATelegramId: string);
-    procedure ClearNextSteps;
 
     procedure SendMenu(const AMessage: TTelegramMessage; const AMenuName: string; const ARecipient: string = '';
       const AExtraData: TCallbackData = nil; const ACaption: string = ''; const APhoto: string = ''); overload;

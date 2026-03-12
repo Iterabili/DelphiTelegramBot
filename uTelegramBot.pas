@@ -629,7 +629,7 @@ var
   vUpdate: TJSONObject;
   vArray: TJSONArray;
 {$IFDEF DEBUG}
-  vRes: string;
+//  vRes: string;
 {$ENDIF}
 begin
   Result := nil;
