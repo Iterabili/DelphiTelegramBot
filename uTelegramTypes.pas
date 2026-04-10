@@ -61,11 +61,12 @@ type
     FKeyboard: TJSONArray;
     FButtons: TObjectList<TTelegramKeyboardButton>;
     function InternalAddRow: TJSONArray;
-    procedure InternalAddButton(const AButton: TTelegramKeyboardButton; const ARow: Integer);
+    function InternalAddButton(const AButton: TTelegramKeyboardButton; const ARow: Integer): Integer;
   public
     constructor Create;
     destructor Destroy; override;
 
+    function RowCount: Integer;
     function ToString: string; override; abstract;
   end;
 
@@ -80,10 +81,10 @@ type
       : Array of TTelegramInlineKeyboardButtonsArray); overload;
 
     procedure AddRow(const AButtons: TTelegramInlineKeyboardButtonsArray);
-    procedure AddButton(const AButton: TTelegramInlineKeyboardButton;
-      const ARow: integer = -1); overload;
-    function AddButton(const AText, AData: string; const ARow: Integer = -1): TTelegramInlineKeyboardButton; overload;
-    function AddUrlButton(const AText, AUrl: string; const ARow: Integer = -1): TTelegramInlineKeyboardButton;
+    function AddButton(const AButton: TTelegramInlineKeyboardButton;
+      const ARow: integer = -1): Integer; overload;
+    function AddButton(const AText, AData: string; const ARow: Integer = -1): Integer; overload;
+    function AddUrlButton(const AText, AUrl: string; const ARow: Integer = -1): Integer;
 
     function ToString: string; override;
   end;
@@ -355,19 +356,30 @@ begin
   inherited;
 end;
 
-procedure TTelegramKeyboardMarkup.InternalAddButton(const AButton: TTelegramKeyboardButton;
-  const ARow: Integer);
+function TTelegramKeyboardMarkup.InternalAddButton(const AButton: TTelegramKeyboardButton;
+  const ARow: Integer): Integer;
 var
   vRow: TJSONArray;
   vJSONButton: TJSONObject;
 begin
   if (ARow < 0) or (ARow >= FKeyboard.Count) then
-    vRow := InternalAddRow
+  begin
+    vRow := InternalAddRow;
+    Result := FKeyboard.Count - 1;
+  end
   else
+  begin
     vRow := TJSONArray(FKeyboard.Items[ARow]);
+    Result := ARow;
+  end;
   vJSONButton := TJSONObject(AButton.JSON.Clone);
   vRow.Add(vJSONButton);
   FButtons.Add(AButton);
+end;
+
+function TTelegramKeyboardMarkup.RowCount: Integer;
+begin
+  Result := FKeyboard.Count;
 end;
 
 function TTelegramKeyboardMarkup.InternalAddRow: TJSONArray;
@@ -378,17 +390,19 @@ end;
 
 { TTelegramInlineKeyboardMarkup }
 
-procedure TTelegramInlineKeyboardMarkup.AddButton(const AButton
-  : TTelegramInlineKeyboardButton; const ARow: integer);
+function TTelegramInlineKeyboardMarkup.AddButton(const AButton
+  : TTelegramInlineKeyboardButton; const ARow: integer): Integer;
 begin
-  InternalAddButton(AButton, ARow);
+  Result := InternalAddButton(AButton, ARow);
 end;
 
 function TTelegramInlineKeyboardMarkup.AddButton(const AText, AData: string;
-  const ARow: Integer = -1): TTelegramInlineKeyboardButton;
+  const ARow: Integer = -1): Integer;
+var
+  vButton: TTelegramInlineKeyboardButton;
 begin
-  Result := TTelegramInlineKeyboardButton.Create(AText, AData);
-  InternalAddButton(Result, ARow);
+  vButton := TTelegramInlineKeyboardButton.Create(AText, AData);
+  Result := InternalAddButton(vButton, ARow);
 end;
 
 procedure TTelegramInlineKeyboardMarkup.AddRow(const AButtons
@@ -408,11 +422,13 @@ begin
 end;
 
 function TTelegramInlineKeyboardMarkup.AddUrlButton(const AText, AUrl: string;
-  const ARow: Integer): TTelegramInlineKeyboardButton;
+  const ARow: Integer): Integer;
+var
+  vButton: TTelegramInlineKeyboardButton;
 begin
-  Result := TTelegramInlineKeyboardButton.Create(AText, '-1');
-  Result.SetUrl(AUrl);
-  InternalAddButton(Result, ARow);
+  vButton := TTelegramInlineKeyboardButton.Create(AText, '-1');
+  vButton.SetUrl(AUrl);
+  Result := InternalAddButton(vButton, ARow);
 end;
 
 constructor TTelegramInlineKeyboardMarkup.Create(const ARows

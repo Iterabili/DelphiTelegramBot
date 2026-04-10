@@ -8,7 +8,7 @@ uses
 type
   TCallbackData = class;  // Forward declaration
 
-  TConstructSimpleMenuProcedure = reference to procedure (const ATelegramid: string; const AData: TCallbackData;
+  TConstructSimpleMenuProcedure = reference to procedure (const ATelegramId: string; const AData: TCallbackData;
     out ACaption: string; out AKeyboard: TTelegramInlineKeyboardMarkup);
 
   TIntegerProc = reference to function (const AValue: Integer): Boolean;
@@ -162,8 +162,8 @@ type
       const ACancelBtn: string = ''; const  APhoto: string = '');
 
 
-    procedure AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: TCallbackData = nil; const ACaption: string = ''; const ARow: Integer = -1); overload;
-    procedure AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: string; const ACaption: string = ''; const ARow: Integer = -1); overload;
+    function AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: TCallbackData = nil; const ACaption: string = ''; const ARow: Integer = -1): Integer; overload;
+    function AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: string; const ACaption: string = ''; const ARow: Integer = -1): Integer; overload;
     function AppendMenuKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton, ATelegramId: string; const AData: TCallbackData; const ACaption: string = ''; const ARow: Integer = -1): Boolean; overload;
     function AppendMenuKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton, ATelegramId, AData: string; const ACaption: string = ''; const ARow: Integer = -1): Boolean; overload;
     //todo: add captions
@@ -558,13 +558,14 @@ begin
       FNextSteps.Remove(AMsg.From.Id);
 end;
 
-procedure TTelegramBotEx.AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: TCallbackData = nil; const ACaption: string = ''; const ARow: Integer = -1);
+function TTelegramBotEx.AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: TCallbackData = nil; const ACaption: string = ''; const ARow: Integer = -1): Integer;
 var
   vButton: TSimpleButton;
   vCaption: string;
   vCallbackData: TCallbackData;
   vOwnsData: Boolean;
 begin
+  Result := -1;
   if not FButtonsMap.TryGetValue(AButton, vButton) then
     Exit;
 
@@ -574,7 +575,7 @@ begin
 
   if vButton.URL <> '' then
   begin
-    AKeyboard.AddUrlButton(vCaption, vButton.URL, ARow);
+    Result := AKeyboard.AddUrlButton(vCaption, vButton.URL, ARow);
     Exit;
   end;
 
@@ -586,22 +587,22 @@ begin
 
   try
     if vCallbackData.Count > 0 then
-      AKeyboard.AddButton(vCaption, IntToStr(vButton.Id) + ' ' + vCallbackData.ToString, ARow)
+      Result := AKeyboard.AddButton(vCaption, IntToStr(vButton.Id) + ' ' + vCallbackData.ToString, ARow)
     else
-      AKeyboard.AddButton(vCaption, IntToStr(vButton.Id), ARow);
+      Result := AKeyboard.AddButton(vCaption, IntToStr(vButton.Id), ARow);
   finally
     if vOwnsData then
       FreeAndNil(vCallbackData);
   end;
 end;
 
-procedure TTelegramBotEx.AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: string; const ACaption: string = ''; const ARow: Integer = -1);
+function TTelegramBotEx.AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: string; const ACaption: string = ''; const ARow: Integer = -1): Integer;
 var
   vCallbackData: TCallbackData;
 begin
   vCallbackData := TCallbackData.Create(AData);
   try
-    AppendKeyboard(AKeyboard, AButton, vCallbackData, ACaption, ARow);
+    Result := AppendKeyboard(AKeyboard, AButton, vCallbackData, ACaption, ARow);
   finally
     FreeAndNil(vCallbackData);
   end;
