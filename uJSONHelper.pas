@@ -43,7 +43,7 @@ type
 implementation
 
 uses
-  SysUtils, RegularExpressions, UIConsts;
+  SysUtils, RegularExpressions, UIConsts, Generics.Collections;
 
 { TJSONHelper }
 
@@ -225,7 +225,7 @@ begin
     Result := TStringList.Create;
     for i := 0 to vArray.Count - 1 do
     begin
-      vValue := TJSONString(vArray.Items[i]).Value;
+      vValue := TJSONString(vArray[i]).Value;
       if Result.IndexOf(vValue) < 0 then
         Result.Add(vValue);
     end;
