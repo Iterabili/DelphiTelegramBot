@@ -49,8 +49,8 @@ type
     procedure SetMyCommands(const ACommands: TStringList);
 
     function GetChat(const AChat: string): TTelegramChat;
-    procedure SendPhoto(const AChatId, APhotoId: string; const AText: string = '';
-      const AReplyMarkup: TTelegramKeyboardMarkup = nil; const ASpoiler: Boolean = False);
+    function SendPhoto(const AChatId, APhotoId: string; const AText: string = '';
+      const AReplyMarkup: TTelegramKeyboardMarkup = nil; const ASpoiler: Boolean = False): string;
     procedure SendDocument(const AChatId, ADocumentId: string; const AText: string = '';
       const AReplyMarkup: TTelegramKeyboardMarkup = nil);
     procedure SendFile(const AChatId, AFilename: string; const AText: string = '');
@@ -72,6 +72,7 @@ type
 
     function SendMessageResulted(const AChatId, AText: string; const AReplyMarkup: TTelegramKeyboardMarkup = nil)
       : TTelegramMessage;
+    function SendPhotoResulted(const AChatId, APhotoId: string): string;
     function EditMessageTextResulted(const AMessage: TTelegramMessage; const AText: string;
       const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil): TTelegramMessage;
 
@@ -477,8 +478,29 @@ begin
   end;
 end;
 
-procedure TTelegramBot.SendPhoto(const AChatId, APhotoId, AText: string; const AReplyMarkup: TTelegramKeyboardMarkup;
-  const ASpoiler: Boolean);
+function TTelegramBot.SendPhotoResulted(const AChatId, APhotoId: string): string;
+var
+  vJSON: TJSONObject;
+  vResult: TJSONObject;
+  vPhotos: TJSONArray;
+begin
+  Result := '';
+  try
+    vJSON := TJSONObject.LoadFromText(SendPhoto(AChatId, APhotoId));
+    vResult := vJSON.ExtractObject('result');
+    if not Assigned(vResult) then
+      Exit;
+    vPhotos := vResult.ExtractArray('photo');
+    if not Assigned(vPhotos) or (vPhotos.Count = 0) then
+      Exit;
+    Result := TJSONObject(vPhotos.Items[vPhotos.Count - 1]).ExtractString('file_id');
+  finally
+    FreeAndNil(vJSON);
+  end;
+end;
+
+function TTelegramBot.SendPhoto(const AChatId, APhotoId, AText: string; const AReplyMarkup: TTelegramKeyboardMarkup;
+  const ASpoiler: Boolean): string;
 var
   vTargetUrl: string;
   vMPD: TMultipartFormData;
@@ -500,10 +522,9 @@ begin
     if Assigned(AReplyMarkup) then
       vMPD.AddField('reply_markup', AReplyMarkup.ToString);
 
-    FHTTPClient.Post(vTargetUrl, vMPD);
+    Result := FHTTPClient.Post(vTargetUrl, vMPD).ContentAsString;
   finally
     FreeAndNil(vMPD);
-    vTargetUrl := '';
   end;
 end;
 
