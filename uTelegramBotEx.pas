@@ -7,6 +7,7 @@ uses
 
 type
   TCallbackData = class;  // Forward declaration
+  TTelegramBotEx = class;  // Forward declaration
 
   TConstructSimpleMenuProcedure = reference to procedure (const ATelegramId: string; const AData: TCallbackData;
     out ACaption: string; out AKeyboard: TTelegramInlineKeyboardMarkup);
@@ -24,6 +25,39 @@ type
   TButtons = array of TButtonsRow;
 
   TTgModalResult = (tmrYes, tmrNo);
+
+  TTelegramModuleClass = class of TTelegramModule;
+
+  TTelegramModule = class
+  private
+    FBot: TTelegramBotEx;
+  protected
+    property Bot: TTelegramBotEx read FBot;
+    procedure RegisterButton(const AName, ACaption: string; const AURL: string = '');
+    procedure RegisterAction(const AName: string);
+    procedure RegisterCommand(const ACommand, ADescription: string);
+    procedure RegisterMenu(const AMenuName, ACaption: string); overload;
+    procedure RegisterMenu(const AMenuName, ACaption: string; const AButtons: TButtons; const ABackButton: string = ''); overload;
+    procedure RegisterMenu(const AMenuName: string; const AConstructProcedure: TConstructSimpleMenuProcedure; const AButtonCaption: string = ''); overload;
+  public
+    constructor Create(const ABot: TTelegramBotEx); virtual;
+    procedure Register; virtual;
+    procedure Initialize; virtual;
+    function OnMessage(const AMessage: TTelegramMessage): Boolean; virtual;
+    function OnCallback(const AAction: string; const AParams: TCallbackData;
+      const ACallback: TTelegramCallbackQuery): Boolean; virtual;
+    function OnAction(const AName: string; const AParams: TCallbackData;
+      const ACallback: TTelegramCallbackQuery): Boolean; virtual;
+    function OnCommand(const ACommand: string; const AMessage: TTelegramMessage): Boolean; virtual;
+    function CanHandleUser(const ATelegramId: string): Boolean; virtual;
+    function CanShowButton(const AButton, ATelegramId, AData: string): Boolean; virtual;
+    function Priority: Integer; virtual;
+  end;
+
+  TModuleEntry = record
+    ModuleClass: TTelegramModuleClass;
+    Priority: Integer;
+  end;
 
   TSimpleButton = class
   public
@@ -89,10 +123,13 @@ type
 
   TTelegramBotEx = class(TTelegramBot)
   private
+    class var FModuleClasses: TList<TModuleEntry>;
+  private
     FSimpleMenus: TObjectDictionary<string, TSimpleMenu>;
     FNextSteps: TDictionary<string, TNextStepFunction>;
     FOnMessageProcedures: TList<TOnTelegramMessage>;
     FOnCallbackQueryProcedures: TList<TOnTelegramCallbackQuery>;
+    FModules: TObjectList<TTelegramModule>;
     function InternalExecuteCalbackAction(const ACallback: TTelegramCallbackQuery): Boolean;
   protected
     FSimpleButtons: TObjectList<TSimpleButton>;
@@ -100,8 +137,10 @@ type
     FActions: TList<string>;
     FActionsMap: TDictionary<string, Integer>;
     FCommands: TObjectList<TBotCommand>;
+    FStopped: Boolean;
+    FGodMenu: Boolean;
 
-    function CheckButtonAdd(const AButton, ATelegramId, AData: string): Boolean; virtual; abstract;
+    function CheckButtonAdd(const AButton, ATelegramId, AData: string): Boolean; virtual;
     function DoOnMessage(const AMessage: TTelegramMessage): Boolean; override;
     function DoOnCallbackQuery(const ACallbackQuery: TTelegramCallbackQuery): Boolean; override;
 
@@ -109,14 +148,23 @@ type
 
     procedure DoInitialize; virtual;
 
-    procedure ExecuteAction(const AName: string; const AParams: TCallbackData; const ACallBack: TTelegramCallbackQuery); virtual; abstract;
+    procedure ExecuteAction(const AName: string; const AParams: TCallbackData; const ACallBack: TTelegramCallbackQuery); virtual;
 
     function ProceedNextStep(const AMsg: TTelegramMessage): Boolean;
+    function HandleModulesMessage(const AMessage: TTelegramMessage): Boolean;
+    function HandleModulesCallback(const ACallback: TTelegramCallbackQuery): Boolean;
   public
     constructor Create(const AToken: string); override;
     destructor Destroy; override;
 
     procedure Initialize;
+
+    class procedure RegisterModule(const AClass: TTelegramModuleClass; const APriority: Integer = 100);
+    function FindModule(const AClass: TTelegramModuleClass): TTelegramModule;
+    function DispatchCommand(const ACommand: string; const AMessage: TTelegramMessage): Boolean;
+
+    property Stopped: Boolean read FStopped write FStopped;
+    property GodMenu: Boolean read FGodMenu write FGodMenu;
 
     procedure RegisterDoOnMessage(const AFunction: TOnTelegramMessage);
     procedure RegisterDoOnCallbackQuery(const AFunction: TOnTelegramCallbackQuery);
@@ -129,8 +177,9 @@ type
     procedure RegisterButton(const AName: string; const ACaption: string; const AURL: string = '');
     procedure RegisterCommand(const ACommand, ADescription: string);
 
+    procedure RegisterMenu(const AMenuName, ACaption: string); overload;
     procedure RegisterMenu(const AMenuName, ACaption: string; const AButtons: TButtons; const ABackButton: string = ''); overload;
-    procedure RegisterMenu(const AMenuName: string; const AConstructProcedure: TConstructSimpleMenuProcedure); overload;
+    procedure RegisterMenu(const AMenuName: string; const AConstructProcedure: TConstructSimpleMenuProcedure; const AButtonCaption: string = ''); overload;
 
    // Value getters
     procedure GetInteger    (const AMessage: TTelegramMessage; const AFrom, ACaption: string; const AProc: TIntegerProc;
@@ -181,7 +230,7 @@ function NormalizeTimeString(const AText: string): string;
 implementation
 
 uses
-  SysUtils, Math, DateUtils, StrUtils;
+  SysUtils, Math, DateUtils, StrUtils, Generics.Defaults;
 
 function CreateDelimitedList(const ADelimitedText: string; const ADelimiter: Char = ';'): TStrings;
 begin
@@ -482,15 +531,47 @@ begin
 end;
 
 procedure TTelegramBotEx.Initialize;
+var
+  vSortedClasses: TList<TModuleEntry>;
+  vEntry: TModuleEntry;
+  vModule: TTelegramModule;
+  I: Integer;
 begin
-  RegisterDoOnMessage(ProceedNextStep);
-  DoInitialize;
-
-  RegisterDoOnCallbackQuery(InternalExecuteCalbackAction);
-
   RegisterButton('confirm', 'Подтвердить');
   RegisterButton('reject', 'Отклонить');
   RegisterButton('calendar_date', 'Выбор дня в календаре');
+
+  vSortedClasses := TList<TModuleEntry>.Create;
+  try
+    for I := 0 to FModuleClasses.Count - 1 do
+      vSortedClasses.Add(FModuleClasses[I]);
+    vSortedClasses.Sort(TComparer<TModuleEntry>.Construct(
+      function(const Left, Right: TModuleEntry): Integer
+      begin
+        Result := Left.Priority - Right.Priority;
+      end));
+    for I := 0 to vSortedClasses.Count - 1 do
+    begin
+      vEntry := vSortedClasses[I];
+      FModules.Add(vEntry.ModuleClass.Create(Self));
+    end;
+  finally
+    FreeAndNil(vSortedClasses);
+  end;
+
+  for vModule in FModules do
+    vModule.Register;
+
+  for vModule in FModules do
+    vModule.Initialize;
+
+  RegisterDoOnMessage(ProceedNextStep);
+  RegisterDoOnMessage(HandleModulesMessage);
+  RegisterDoOnCallbackQuery(InternalExecuteCalbackAction);
+  RegisterDoOnCallbackQuery(HandleModulesCallback);
+
+  DoInitialize;
+  SendCommandsToTelegram;
 end;
 
 function TTelegramBotEx.InternalExecuteCalbackAction(const ACallback: TTelegramCallbackQuery): Boolean;
@@ -500,6 +581,7 @@ var
   vInitialCount: Integer;
   vPhoto, vData, vCancelBtn: string;
   vCallbackData: TCallbackData;
+  vExtraData: TCallbackData;
 begin
   Result := True;
 
@@ -543,6 +625,17 @@ begin
       SendCalendar(ACallback.AtMessage, StrToDate(vCallbackData.GetString(2)), StrToDate(vCallbackData.GetString(3)),
         ACallback.From.Id, FActions[vCallbackData.GetInteger(1)], vData,
         FSimpleButtons[vCallbackData.GetInteger(4)].Name, vCancelBtn, vPhoto);
+    end
+    else if FSimpleMenus.ContainsKey(vButton) then
+    begin
+      vExtraData := TCallbackData.Create;
+      try
+        for I := 1 to vCallbackData.Count - 1 do
+          vExtraData.Add(vCallbackData.GetString(I));
+        SendMenu(ACallback.AtMessage, vButton, ACallback.From.Id, vExtraData);
+      finally
+        FreeAndNil(vExtraData);
+      end;
     end
     else
       Result := False;
@@ -654,6 +747,7 @@ begin
   FCommands := TObjectList<TBotCommand>.Create;
   FOnMessageProcedures := TList<TOnTelegramMessage>.Create;
   FOnCallbackQueryProcedures := TList<TOnTelegramCallbackQuery>.Create;
+  FModules := TObjectList<TTelegramModule>.Create;
 end;
 
 procedure TTelegramBotEx.DeleteNextStep(const ATelegramId: string);
@@ -663,6 +757,7 @@ end;
 
 destructor TTelegramBotEx.Destroy;
 begin
+  FreeAndNil(FModules);
   FreeAndNil(FSimpleButtons);
   FreeAndNil(FSimpleMenus);
   FreeAndNil(FButtonsMap);
@@ -704,6 +799,98 @@ end;
 procedure TTelegramBotEx.DoInitialize;
 begin
 
+end;
+
+function TTelegramBotEx.CheckButtonAdd(const AButton, ATelegramId, AData: string): Boolean;
+var
+  vModule: TTelegramModule;
+begin
+  if AButton = '' then
+    Exit(False);
+  Result := True;
+  for vModule in FModules do
+    if not vModule.CanShowButton(AButton, ATelegramId, AData) then
+      Exit(False);
+end;
+
+procedure TTelegramBotEx.ExecuteAction(const AName: string; const AParams: TCallbackData; const ACallBack: TTelegramCallbackQuery);
+var
+  vModule: TTelegramModule;
+begin
+  for vModule in FModules do
+    if vModule.OnAction(AName, AParams, ACallBack) then
+      Exit;
+end;
+
+function TTelegramBotEx.HandleModulesMessage(const AMessage: TTelegramMessage): Boolean;
+var
+  vModule: TTelegramModule;
+begin
+  Result := False;
+  for vModule in FModules do
+  begin
+    if not vModule.CanHandleUser(AMessage.From.Id) then
+      Continue;
+    if vModule.OnMessage(AMessage) then
+      Exit(True);
+  end;
+end;
+
+function TTelegramBotEx.HandleModulesCallback(const ACallback: TTelegramCallbackQuery): Boolean;
+var
+  vCallbackData: TCallbackData;
+  vBId: Integer;
+  vAction: string;
+  vModule: TTelegramModule;
+begin
+  Result := False;
+  vCallbackData := TCallbackData.Create(ACallback.Data);
+  try
+    if vCallbackData.Count < 1 then
+      Exit;
+    vBId := vCallbackData.GetInteger(0);
+    if (vBId < 0) or (vBId >= FSimpleButtons.Count) then
+      Exit;
+    vAction := FSimpleButtons[vBId].Name;
+    for vModule in FModules do
+    begin
+      if not vModule.CanHandleUser(ACallback.From.Id) then
+        Continue;
+      if vModule.OnCallback(vAction, vCallbackData, ACallback) then
+        Exit(True);
+    end;
+  finally
+    FreeAndNil(vCallbackData);
+  end;
+end;
+
+function TTelegramBotEx.DispatchCommand(const ACommand: string; const AMessage: TTelegramMessage): Boolean;
+var
+  vModule: TTelegramModule;
+begin
+  Result := False;
+  for vModule in FModules do
+    if vModule.OnCommand(ACommand, AMessage) then
+      Exit(True);
+end;
+
+function TTelegramBotEx.FindModule(const AClass: TTelegramModuleClass): TTelegramModule;
+var
+  vModule: TTelegramModule;
+begin
+  Result := nil;
+  for vModule in FModules do
+    if vModule.ClassType = AClass then
+      Exit(vModule);
+end;
+
+class procedure TTelegramBotEx.RegisterModule(const AClass: TTelegramModuleClass; const APriority: Integer);
+var
+  vEntry: TModuleEntry;
+begin
+  vEntry.ModuleClass := AClass;
+  vEntry.Priority := APriority;
+  FModuleClasses.Add(vEntry);
 end;
 
 procedure TTelegramBotEx.RegisterAction(const AName: string);
@@ -750,11 +937,19 @@ begin
   end;
 end;
 
+procedure TTelegramBotEx.RegisterMenu(const AMenuName, ACaption: string);
+begin
+  if not FButtonsMap.ContainsKey(AMenuName) then
+    RegisterButton(AMenuName, ACaption);
+end;
+
 procedure TTelegramBotEx.RegisterMenu(const AMenuName: string;
-  const AConstructProcedure: TConstructSimpleMenuProcedure);
+  const AConstructProcedure: TConstructSimpleMenuProcedure; const AButtonCaption: string = '');
 begin
   Assert(Assigned(AConstructProcedure), 'Функция создания должна быть!');
   FSimpleMenus.Add(AMenuName, TSimpleMenu.Create(FSimpleMenus.Count, AConstructProcedure));
+  if (AButtonCaption <> '') and not FButtonsMap.ContainsKey(AMenuName) then
+    RegisterButton(AMenuName, AButtonCaption);
 end;
 
 procedure TTelegramBotEx.RegisterNextStep(const AChatId: string; const AProcedure: TNextStepFunction; const AObject: TObject);
@@ -783,6 +978,8 @@ begin
     end;
   end;
   FSimpleMenus.Add(AMenuName, vSimpleMenu);
+  if not FButtonsMap.ContainsKey(AMenuName) then
+    RegisterButton(AMenuName, ACaption);
 end;
 
 procedure TTelegramBotEx.SendCalendar(const AMessage: TTelegramMessage; const ACurrentDate, AMinDate: TDateTime; const ATelegramId, ASelectDateAction, AData, AAcceptBtn: string;
@@ -953,6 +1150,89 @@ begin
   finally
     FreeAndNil(vData);
   end;
+end;
+
+{ TTelegramModule }
+
+constructor TTelegramModule.Create(const ABot: TTelegramBotEx);
+begin
+  inherited Create;
+  FBot := ABot;
+end;
+
+procedure TTelegramModule.Register;
+begin
+end;
+
+procedure TTelegramModule.Initialize;
+begin
+end;
+
+function TTelegramModule.OnMessage(const AMessage: TTelegramMessage): Boolean;
+begin
+  Result := False;
+end;
+
+function TTelegramModule.OnCallback(const AAction: string; const AParams: TCallbackData;
+  const ACallback: TTelegramCallbackQuery): Boolean;
+begin
+  Result := False;
+end;
+
+function TTelegramModule.OnAction(const AName: string; const AParams: TCallbackData;
+  const ACallback: TTelegramCallbackQuery): Boolean;
+begin
+  Result := False;
+end;
+
+function TTelegramModule.OnCommand(const ACommand: string; const AMessage: TTelegramMessage): Boolean;
+begin
+  Result := False;
+end;
+
+function TTelegramModule.CanHandleUser(const ATelegramId: string): Boolean;
+begin
+  Result := True;
+end;
+
+function TTelegramModule.CanShowButton(const AButton, ATelegramId, AData: string): Boolean;
+begin
+  Result := True;
+end;
+
+function TTelegramModule.Priority: Integer;
+begin
+  Result := 100;
+end;
+
+procedure TTelegramModule.RegisterButton(const AName, ACaption: string; const AURL: string = '');
+begin
+  FBot.RegisterButton(AName, ACaption, AURL);
+end;
+
+procedure TTelegramModule.RegisterAction(const AName: string);
+begin
+  FBot.RegisterAction(AName);
+end;
+
+procedure TTelegramModule.RegisterCommand(const ACommand, ADescription: string);
+begin
+  FBot.RegisterCommand(ACommand, ADescription);
+end;
+
+procedure TTelegramModule.RegisterMenu(const AMenuName, ACaption: string);
+begin
+  FBot.RegisterMenu(AMenuName, ACaption);
+end;
+
+procedure TTelegramModule.RegisterMenu(const AMenuName, ACaption: string; const AButtons: TButtons; const ABackButton: string = '');
+begin
+  FBot.RegisterMenu(AMenuName, ACaption, AButtons, ABackButton);
+end;
+
+procedure TTelegramModule.RegisterMenu(const AMenuName: string; const AConstructProcedure: TConstructSimpleMenuProcedure; const AButtonCaption: string = '');
+begin
+  FBot.RegisterMenu(AMenuName, AConstructProcedure, AButtonCaption);
 end;
 
 { TSimpleButton }
@@ -1151,5 +1431,11 @@ procedure TTelegramBotEx.RegisterDoOnCallbackQuery(const AFunction: TOnTelegramC
 begin
   FOnCallbackQueryProcedures.Add(AFunction);
 end;
+
+initialization
+  TTelegramBotEx.FModuleClasses := TList<TModuleEntry>.Create;
+
+finalization
+  FreeAndNil(TTelegramBotEx.FModuleClasses);
 
 end.

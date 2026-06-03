@@ -43,7 +43,10 @@ type
     destructor Destroy; override;
 
     procedure Poll;
-    procedure StartPolling; virtual; abstract;
+    procedure ProcessUpdate(const AUpdate: TJSONObject);
+    procedure StartPolling; virtual;
+    procedure SetWebhook(const AUrl: string; const ASecretToken: string = ''; const ACertPath: string = '');
+    procedure DeleteWebhook;
 
     procedure AnswerCallbackQuery(const ACallbackId: String; const AMessage: string = '');
     procedure SetMyCommands(const ACommands: TStringList);
@@ -745,6 +748,51 @@ begin
     end;
   finally
     FreeAndNil(vUpdate);
+  end;
+end;
+
+procedure TTelegramBot.ProcessUpdate(const AUpdate: TJSONObject);
+begin
+  case GetUpdateType(AUpdate) of
+    tutMessage:
+      ProceedMessage(AUpdate);
+    tutCallbackQuery:
+      ProceedCallbackQuery(AUpdate);
+  end;
+end;
+
+procedure TTelegramBot.StartPolling;
+begin
+end;
+
+procedure TTelegramBot.SetWebhook(const AUrl: string; const ASecretToken: string; const ACertPath: string);
+var
+  vTargetUrl: string;
+  vMPD: TMultipartFormData;
+begin
+  vTargetUrl := FBotUrl + '/setWebhook';
+  vMPD := TMultipartFormData.Create;
+  try
+    vMPD.AddField('url', AUrl);
+    if ASecretToken <> '' then
+      vMPD.AddField('secret_token', ASecretToken);
+    if ACertPath <> '' then
+      vMPD.AddFile('certificate', ACertPath, 'application/x-pem-file');
+    FHTTPClient.Post(vTargetUrl, vMPD);
+  finally
+    FreeAndNil(vMPD);
+  end;
+end;
+
+procedure TTelegramBot.DeleteWebhook;
+var
+  vParams: TStringList;
+begin
+  vParams := TStringList.Create;
+  try
+    PostMethod('deleteWebhook', vParams);
+  finally
+    FreeAndNil(vParams);
   end;
 end;
 
