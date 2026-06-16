@@ -51,13 +51,8 @@ type
     function OnCommand(const ACommand: string; const AMessage: TTelegramMessage): Boolean; virtual;
     function CanHandleUser(const ATelegramId: string): Boolean; virtual;
     function CanShowButton(const AButton, ATelegramId, AData: string): Boolean; virtual;
-    function Priority: Integer; virtual;
   end;
 
-  TModuleEntry = record
-    ModuleClass: TTelegramModuleClass;
-    Priority: Integer;
-  end;
 
   TSimpleButton = class
   public
@@ -123,7 +118,7 @@ type
 
   TTelegramBotEx = class(TTelegramBot)
   private
-    class var FModuleClasses: TList<TModuleEntry>;
+    class var FModuleClasses: TList<TTelegramModuleClass>;
   private
     FSimpleMenus: TObjectDictionary<string, TSimpleMenu>;
     FNextSteps: TDictionary<string, TNextStepFunction>;
@@ -137,9 +132,6 @@ type
     FActions: TList<string>;
     FActionsMap: TDictionary<string, Integer>;
     FCommands: TObjectList<TBotCommand>;
-    FStopped: Boolean;
-    FGodMenu: Boolean;
-
     function CheckButtonAdd(const AButton, ATelegramId, AData: string): Boolean; virtual;
     function DoOnMessage(const AMessage: TTelegramMessage): Boolean; override;
     function DoOnCallbackQuery(const ACallbackQuery: TTelegramCallbackQuery): Boolean; override;
@@ -159,12 +151,9 @@ type
 
     procedure Initialize;
 
-    class procedure RegisterModule(const AClass: TTelegramModuleClass; const APriority: Integer = 100);
+    class procedure RegisterModule(const AClass: TTelegramModuleClass);
     function FindModule(const AClass: TTelegramModuleClass): TTelegramModule;
     function DispatchCommand(const ACommand: string; const AMessage: TTelegramMessage): Boolean;
-
-    property Stopped: Boolean read FStopped write FStopped;
-    property GodMenu: Boolean read FGodMenu write FGodMenu;
 
     procedure RegisterDoOnMessage(const AFunction: TOnTelegramMessage);
     procedure RegisterDoOnCallbackQuery(const AFunction: TOnTelegramCallbackQuery);
@@ -532,8 +521,6 @@ end;
 
 procedure TTelegramBotEx.Initialize;
 var
-  vSortedClasses: TList<TModuleEntry>;
-  vEntry: TModuleEntry;
   vModule: TTelegramModule;
   I: Integer;
 begin
@@ -541,23 +528,8 @@ begin
   RegisterButton('reject', 'Отклонить');
   RegisterButton('calendar_date', 'Выбор дня в календаре');
 
-  vSortedClasses := TList<TModuleEntry>.Create;
-  try
-    for I := 0 to FModuleClasses.Count - 1 do
-      vSortedClasses.Add(FModuleClasses[I]);
-    vSortedClasses.Sort(TComparer<TModuleEntry>.Construct(
-      function(const Left, Right: TModuleEntry): Integer
-      begin
-        Result := Left.Priority - Right.Priority;
-      end));
-    for I := 0 to vSortedClasses.Count - 1 do
-    begin
-      vEntry := vSortedClasses[I];
-      FModules.Add(vEntry.ModuleClass.Create(Self));
-    end;
-  finally
-    FreeAndNil(vSortedClasses);
-  end;
+  for I := 0 to FModuleClasses.Count - 1 do
+    FModules.Add(FModuleClasses[I].Create(Self));
 
   for vModule in FModules do
     vModule.Register;
@@ -884,13 +856,9 @@ begin
       Exit(vModule);
 end;
 
-class procedure TTelegramBotEx.RegisterModule(const AClass: TTelegramModuleClass; const APriority: Integer);
-var
-  vEntry: TModuleEntry;
+class procedure TTelegramBotEx.RegisterModule(const AClass: TTelegramModuleClass);
 begin
-  vEntry.ModuleClass := AClass;
-  vEntry.Priority := APriority;
-  FModuleClasses.Add(vEntry);
+  FModuleClasses.Add(AClass);
 end;
 
 procedure TTelegramBotEx.RegisterAction(const AName: string);
@@ -1200,11 +1168,6 @@ begin
   Result := True;
 end;
 
-function TTelegramModule.Priority: Integer;
-begin
-  Result := 100;
-end;
-
 procedure TTelegramModule.RegisterButton(const AName, ACaption: string; const AURL: string = '');
 begin
   FBot.RegisterButton(AName, ACaption, AURL);
@@ -1433,7 +1396,7 @@ begin
 end;
 
 initialization
-  TTelegramBotEx.FModuleClasses := TList<TModuleEntry>.Create;
+  TTelegramBotEx.FModuleClasses := TList<TTelegramModuleClass>.Create;
 
 finalization
   FreeAndNil(TTelegramBotEx.FModuleClasses);
