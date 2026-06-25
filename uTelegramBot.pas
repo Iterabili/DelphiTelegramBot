@@ -50,6 +50,8 @@ type
 
     procedure AnswerCallbackQuery(const ACallbackId: String; const AMessage: string = '');
     procedure SetMyCommands(const ACommands: TStringList);
+    procedure SetMyDescription(const ADescription: string; const ALanguageCode: string = '');
+    procedure SetMyShortDescription(const AShortDescription: string; const ALanguageCode: string = '');
 
     function GetChat(const AChat: string): TTelegramChat;
     function SendPhoto(const AChatId, APhotoId: string; const AText: string = '';
@@ -142,6 +144,36 @@ begin
     PostMethodAsync('setMyCommands', vParams, nil);
   finally
     FreeAndNil(vCommandsJSON);
+    FreeAndNil(vParams);
+  end;
+end;
+
+procedure TTelegramBot.SetMyDescription(const ADescription, ALanguageCode: string);
+var
+  vParams: TStringList;
+begin
+  vParams := TStringList.Create;
+  try
+    vParams.Append('description=' + ADescription);
+    if ALanguageCode <> '' then
+      vParams.Append('language_code=' + ALanguageCode);
+    PostMethodAsync('setMyDescription', vParams, nil);
+  finally
+    FreeAndNil(vParams);
+  end;
+end;
+
+procedure TTelegramBot.SetMyShortDescription(const AShortDescription, ALanguageCode: string);
+var
+  vParams: TStringList;
+begin
+  vParams := TStringList.Create;
+  try
+    vParams.Append('short_description=' + AShortDescription);
+    if ALanguageCode <> '' then
+      vParams.Append('language_code=' + ALanguageCode);
+    PostMethodAsync('setMyShortDescription', vParams, nil);
+  finally
     FreeAndNil(vParams);
   end;
 end;
