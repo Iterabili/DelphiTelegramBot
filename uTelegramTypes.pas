@@ -173,7 +173,6 @@ type
     : TTelegramMessage): Boolean;
   TOnTelegramCallbackQuery = reference to function(const ACallbackQuery
     : TTelegramCallbackQuery): Boolean;
-  TNextStepFunction = reference to function(const AMessage: TTelegramMessage): Boolean;
 
 function ActionId(const AAction: string; const AActions: array of string): Integer;
 
