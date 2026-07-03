@@ -55,7 +55,11 @@ type
 
     function GetChat(const AChat: string): TTelegramChat;
     function SendPhoto(const AChatId, APhotoId: string; const AText: string = '';
-      const AReplyMarkup: TTelegramKeyboardMarkup = nil; const ASpoiler: Boolean = False): string;
+      const AReplyMarkup: TTelegramKeyboardMarkup = nil; const ASpoiler: Boolean = False): string; overload;
+    // Отправить фото напрямую из потока (без временного файла на диске). Забирает владение AStream.
+    function SendPhoto(const AChatId: string; const AStream: TStream; const AFileName: string;
+      const AText: string = ''; const AReplyMarkup: TTelegramKeyboardMarkup = nil;
+      const ASpoiler: Boolean = False): string; overload;
     procedure SendDocument(const AChatId, ADocumentId: string; const AText: string = '';
       const AReplyMarkup: TTelegramKeyboardMarkup = nil);
     procedure SendFile(const AChatId, AFilename: string; const AText: string = '');
@@ -553,6 +557,32 @@ begin
       vMPD.AddFile('photo', APhotoId)
     else
       vMPD.AddField('photo', APhotoId);
+
+    if Assigned(AReplyMarkup) then
+      vMPD.AddField('reply_markup', AReplyMarkup.ToString);
+
+    Result := FHTTPClient.Post(vTargetUrl, vMPD).ContentAsString;
+  finally
+    FreeAndNil(vMPD);
+  end;
+end;
+
+function TTelegramBot.SendPhoto(const AChatId: string; const AStream: TStream; const AFileName, AText: string;
+  const AReplyMarkup: TTelegramKeyboardMarkup; const ASpoiler: Boolean): string;
+var
+  vTargetUrl: string;
+  vMPD: TMultipartFormData;
+begin
+  vTargetUrl := FBotUrl + '/sendPhoto';
+  vMPD := TMultipartFormData.Create;
+  try
+    vMPD.AddField('chat_id', AChatId);
+    vMPD.AddField('has_spoiler', BoolToStr(ASpoiler, True));
+
+    if AText <> '' then
+      vMPD.AddField('caption', AText);
+
+    vMPD.AddStream('photo', AStream, True, AFileName);
 
     if Assigned(AReplyMarkup) then
       vMPD.AddField('reply_markup', AReplyMarkup.ToString);

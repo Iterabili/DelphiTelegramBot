@@ -35,6 +35,7 @@ type
     procedure RegisterAction(const AName: string); overload;
     procedure RegisterAction<T: TCallbackData, constructor>(const AName: string; const AHandler: TProc<T, TTgModalResult>); overload;
     procedure RegisterCommand(const ACommand, ADescription: string);
+    procedure RegisterMessageHandler(const AHandler: TOnTelegramMessage; const APriority: Integer = 100);
     procedure RegisterMenu(const AMenuName, ACaption: string); overload;
     procedure RegisterMenu(const AMenuName, ACaption: string; const AButtons: TButtons; const ABackButton: string = ''); overload;
     procedure RegisterMenu(const AMenuName: string; const AConstructProcedure: TConstructSimpleMenuProcedure; const AButtonCaption: string = ''); overload;
@@ -62,6 +63,11 @@ type
     URL: string;
 
     constructor Create(const AId: Integer; const AName, ACaption: string; const AURL: string);
+  end;
+
+  TMessageHandlerEntry = record
+    Priority: Integer;
+    Handler: TOnTelegramMessage;
   end;
 
   TBotCommand = class
@@ -172,6 +178,8 @@ type
     property ChatId: string read FChatId;
     property CancelButton: string write FCancelButton;
     property CancelButtonData: TCallbackData write SetCancelButtonData;
+    // Валиден только сразу после Await* (до следующего Await) — сообщение освобождается в ProceedMessage
+    property LastMessage: TTelegramMessage read FPendingMessage;
     function AwaitMessage: TTelegramMessage;
     function AwaitString(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
     function AwaitInteger(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Integer;
@@ -216,12 +224,15 @@ type
     FOnMessageProcedures: TList<TOnTelegramMessage>;
     FOnCallbackQueryProcedures: TList<TOnTelegramCallbackQuery>;
     FModules: TObjectList<TTelegramModule>;
+    FMessageHandlers: TList<TMessageHandlerEntry>;
     FTypedHandlers: TObjectDictionary<string, TTypedButtonHandler>;
     FTypedActions: TObjectDictionary<string, TTypedActionHandler>;
     FSchedulerFiber: Pointer;
     FActiveFlows: TObjectDictionary<string, TFlowState>;
     function InternalExecuteCalbackAction(const ACallback: TTelegramCallbackQuery): Boolean;
     function TryResumeFlowWithMessage(const AMessage: TTelegramMessage): Boolean;
+    function HandleRegisteredMessages(const AMessage: TTelegramMessage): Boolean;
+    function DispatchCommandMessage(const AMessage: TTelegramMessage): Boolean;
     function TryResumeFlowWithCallback(const ACallback: TTelegramCallbackQuery): Boolean;
     procedure SilentTerminateFlow(const AChatId: string; const AState: TFlowState);
     procedure BuildCalendarKeyboard(const ATelegramId: string;
@@ -257,6 +268,7 @@ type
     class procedure RegisterModule(const AClass: TTelegramModuleClass);
     function FindModule(const AClass: TTelegramModuleClass): TTelegramModule;
     function DispatchCommand(const ACommand: string; const AMessage: TTelegramMessage): Boolean;
+    procedure RegisterMessageHandler(const AHandler: TOnTelegramMessage; const APriority: Integer = 100);
 
     procedure RegisterDoOnMessage(const AFunction: TOnTelegramMessage);
     procedure RegisterDoOnCallbackQuery(const AFunction: TOnTelegramCallbackQuery);
@@ -264,6 +276,7 @@ type
     procedure StartFlow(const AChatId: string; const AProc: TFlowProc);
     procedure CancelFlow(const AChatId: string);
     procedure DoFlowError(const AChatId: string; const AException: Exception); virtual;
+    procedure DoUnrecognizedCommand(const AMessage: TTelegramMessage); virtual;
     procedure InitSchedulerFiber;
     function SendCalendarResulted(const ATelegramId: string;
       const ACurrentDate, AMinDate: TDateTime; const ACancelButton: string = '';
@@ -886,10 +899,8 @@ var
   vButton: string;
   vChatId: string;
   vCompleted: Boolean;
-  vDidResume: Boolean;
 begin
   Result := False;
-  vDidResume := False;
   vChatId := '';
   if not FActiveFlows.TryGetValue(ACallback.From.Id, vState) then
     Exit;
@@ -932,18 +943,14 @@ begin
     vState.Context.FPendingType := fptNone;
     Result := True;
     vChatId := ACallback.From.Id;
-    vDidResume := True;
     SwitchToFiber(vState.FiberHandle);
   finally
     FreeAndNil(vCallbackData);
   end;
 
-  if vDidResume then
-  begin
-    vCompleted := vState.Context.FCompleted;
-    if vCompleted then
-      FActiveFlows.Remove(vChatId);
-  end;
+  vCompleted := vState.Context.FCompleted;
+  if vCompleted then
+    FActiveFlows.Remove(vChatId);
 end;
 
 procedure TTelegramBotEx.Initialize;
@@ -958,6 +965,9 @@ begin
   RegisterButton('flow_enter_text', 'Ввести вручную');
   RegisterAction('FlowCalendarSelect');
 
+  RegisterDoOnMessage(TryResumeFlowWithMessage);
+  RegisterDoOnCallbackQuery(TryResumeFlowWithCallback);
+
   for I := 0 to FModuleClasses.Count - 1 do
     FModules.Add(FModuleClasses[I].Create(Self));
 
@@ -967,9 +977,9 @@ begin
   for vModule in FModules do
     vModule.Initialize;
 
-  RegisterDoOnMessage(TryResumeFlowWithMessage);
+  RegisterDoOnMessage(DispatchCommandMessage);
+  RegisterDoOnMessage(HandleRegisteredMessages);
   RegisterDoOnMessage(HandleModulesMessage);
-  RegisterDoOnCallbackQuery(TryResumeFlowWithCallback);
   RegisterDoOnCallbackQuery(InternalExecuteCalbackAction);
   RegisterDoOnCallbackQuery(HandleModulesCallback);
 
@@ -1161,6 +1171,7 @@ begin
   FOnMessageProcedures := TList<TOnTelegramMessage>.Create;
   FOnCallbackQueryProcedures := TList<TOnTelegramCallbackQuery>.Create;
   FModules := TObjectList<TTelegramModule>.Create;
+  FMessageHandlers := TList<TMessageHandlerEntry>.Create;
 end;
 
 destructor TTelegramBotEx.Destroy;
@@ -1169,6 +1180,7 @@ begin
   FreeAndNil(FTypedHandlers);
   FreeAndNil(FTypedActions);
   FreeAndNil(FModules);
+  FreeAndNil(FMessageHandlers);
   FreeAndNil(FSimpleButtons);
   FreeAndNil(FSimpleMenus);
   FreeAndNil(FButtonsMap);
@@ -1273,6 +1285,55 @@ begin
     if vModule.OnMessage(AMessage) then
       Exit(True);
   end;
+end;
+
+procedure TTelegramBotEx.RegisterMessageHandler(const AHandler: TOnTelegramMessage; const APriority: Integer);
+var
+  vEntry: TMessageHandlerEntry;
+  I: Integer;
+begin
+  vEntry.Priority := APriority;
+  vEntry.Handler := AHandler;
+  I := 0;
+  while (I < FMessageHandlers.Count) and (FMessageHandlers[I].Priority <= APriority) do
+    Inc(I);
+  FMessageHandlers.Insert(I, vEntry);
+end;
+
+function TTelegramBotEx.HandleRegisteredMessages(const AMessage: TTelegramMessage): Boolean;
+var
+  vEntry: TMessageHandlerEntry;
+begin
+  Result := False;
+  for vEntry in FMessageHandlers do
+    if vEntry.Handler(AMessage) then
+      Exit(True);
+end;
+
+function TTelegramBotEx.DispatchCommandMessage(const AMessage: TTelegramMessage): Boolean;
+var
+  vText, vCommand: string;
+  vSpacePos: Integer;
+begin
+  Result := False;
+  vText := Trim(AMessage.Text);
+  if (vText = '') or (vText[1] <> '/') then
+    Exit;
+
+  vSpacePos := Pos(' ', vText);
+  if vSpacePos > 0 then
+    vCommand := Copy(vText, 1, vSpacePos - 1)
+  else
+    vCommand := vText;
+
+  if not DispatchCommand(vCommand, AMessage) then
+    DoUnrecognizedCommand(AMessage);
+  Result := True;
+end;
+
+procedure TTelegramBotEx.DoUnrecognizedCommand(const AMessage: TTelegramMessage);
+begin
+  SendMessage(AMessage.From.Id, 'Неизвестная команда');
 end;
 
 function TTelegramBotEx.HandleModulesCallback(const ACallback: TTelegramCallbackQuery): Boolean;
@@ -1750,6 +1811,11 @@ end;
 procedure TTelegramModule.RegisterCommand(const ACommand, ADescription: string);
 begin
   FBot.RegisterCommand(ACommand, ADescription);
+end;
+
+procedure TTelegramModule.RegisterMessageHandler(const AHandler: TOnTelegramMessage; const APriority: Integer);
+begin
+  FBot.RegisterMessageHandler(AHandler, APriority);
 end;
 
 procedure TTelegramModule.RegisterMenu(const AMenuName, ACaption: string);
