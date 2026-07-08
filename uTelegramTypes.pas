@@ -136,7 +136,8 @@ type
     FForwardFrom: TTelegramUser;
     FTime: Int64;
   public
-    constructor Create(const AMessage: TJSONObject);
+    constructor Create(const AMessage: TJSONObject); overload;
+    constructor Create(const AChat: string; const AMessageId: Integer); overload;
     destructor Destroy; override;
 
     property MessageId: integer read FMessageId write FMessageId;
@@ -240,6 +241,20 @@ begin
   vForwardFrom := AMessage.ExtractObject('forward_from');
   if Assigned(vForwardFrom) then
     FForwardFrom := TTelegramUser.Create(vForwardFrom);
+end;
+
+constructor TTelegramMessage.Create(const AChat: string; const AMessageId: Integer);
+begin
+  FMessageId := AMessageId;
+  FChat := AChat;
+  FText := '';
+  FPhotoId := '';
+  FDocumentId := '';
+  FContact := nil;
+  FReplyTo := nil;
+  FFrom := nil;
+  FForwardFrom := nil;
+  FTime := 0;
 end;
 
 destructor TTelegramMessage.Destroy;
