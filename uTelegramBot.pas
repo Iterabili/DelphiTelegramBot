@@ -4,7 +4,7 @@ interface
 
 uses
   System.Classes, System.SysUtils, System.Generics.Collections,
-  uTelegramTypes, Net.URLClient, Net.HttpClient, JSON, Types;
+  uTelegramTypes, Net.URLClient, Net.HttpClient, JSON, Types, uTelegramSendQueue;
 
 type
   TTelegramBot = class;
@@ -29,8 +29,8 @@ type
     function GetUpdateType(const AUpdate: TJSONObject): TTelegramUpdateType;
     function PostMethod(const AMethodName: String; const AParams: TStringList;
       const AReplyMarkup: TTelegramKeyboardMarkup = nil): string;
-    procedure PostMethodAsync(const AMethodName: String; const AParams: TStringList;
-      const AReplyMarkup: TTelegramKeyboardMarkup = nil);
+    procedure PostMethodAsync(const AMethodName: String; const AParams: TStringList; const AKind: TTelegramQueueKind;
+      const AReplyMarkup: TTelegramKeyboardMarkup = nil; const AOnSent: TProc<string> = nil);
 
     procedure SetBotToken(const Value: string);
   protected
@@ -42,7 +42,7 @@ type
     constructor Create(const AToken: string); virtual;
     destructor Destroy; override;
 
-    procedure Poll;
+    procedure Poll; virtual;
     procedure ProcessUpdate(const AUpdate: TJSONObject);
     procedure StartPolling; virtual;
     procedure SetWebhook(const AUrl: string; const ASecretToken: string = ''; const ACertPath: string = '');
@@ -55,7 +55,8 @@ type
 
     function GetChat(const AChat: string): TTelegramChat;
     function SendPhoto(const AChatId, APhotoId: string; const AText: string = '';
-      const AReplyMarkup: TTelegramKeyboardMarkup = nil; const ASpoiler: Boolean = False): string; overload;
+      const AReplyMarkup: TTelegramKeyboardMarkup = nil; const ASpoiler: Boolean = False;
+      const AOnSent: TProc<string> = nil; const AKind: TTelegramQueueKind = tqkSend): string; overload;
     // Отправить фото напрямую из потока (без временного файла на диске). Забирает владение AStream.
     function SendPhoto(const AChatId: string; const AStream: TStream; const AFileName: string;
       const AText: string = ''; const AReplyMarkup: TTelegramKeyboardMarkup = nil;
@@ -63,7 +64,7 @@ type
     procedure SendDocument(const AChatId, ADocumentId: string; const AText: string = '';
       const AReplyMarkup: TTelegramKeyboardMarkup = nil);
     procedure SendFile(const AChatId, AFilename: string; const AText: string = '');
-    function GetFile(const AFileId: string): string;
+    procedure GetFile(const AFileId: string; const AOnSent: TProc<string>);
 
     procedure SendMediaGroup(const AChatId: string; const AMedia: TList<string>; const AType: TTelegramMediaType;
       const AText: string = '');
@@ -71,19 +72,20 @@ type
     procedure CopyMessage(const ATargetChat: string; const AMessage: TTelegramMessage); overload;
 
     function SendMessage(const AChatId, AText: string; const AReplyMarkup: TTelegramKeyboardMarkup = nil;
-      const ASync: Boolean = False): string;
+      const AOnSent: TProc<string> = nil; const AKind: TTelegramQueueKind = tqkSend): string;
     function EditMessageText(const AMessage: TTelegramMessage; const AText: string;
-      const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil): string;
+      const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil; const AOnSent: TProc<string> = nil): string;
     function EditMessageCaption(const AMessage: TTelegramMessage; const ACaption: string;
       const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil): string;
     function ForwardMessage(const AMessage: TTelegramMessage; const ATelegramId: string): string;
-    function CopyMessage(const ATargetChat, AFromChat: string; const AMessageId: Integer): string; overload;
+    function CopyMessage(const ATargetChat, AFromChat: string; const AMessageId: Integer;
+      const AOnSent: TProc<string> = nil; const AKind: TTelegramQueueKind = tqkSend): string; overload;
 
-    function SendMessageResulted(const AChatId, AText: string; const AReplyMarkup: TTelegramKeyboardMarkup = nil)
-      : TTelegramMessage;
+    procedure SendMessageResulted(const AChatId, AText: string; const AReplyMarkup: TTelegramKeyboardMarkup;
+      const AOnSent: TProc<TTelegramMessage>);
     function SendPhotoResulted(const AChatId, APhotoId: string): string;
-    function EditMessageTextResulted(const AMessage: TTelegramMessage; const AText: string;
-      const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil): TTelegramMessage;
+    procedure EditMessageTextResulted(const AMessage: TTelegramMessage; const AText: string;
+      const AReplyMarkup: TTelegramInlineKeyboardMarkup; const AOnSent: TProc<TTelegramMessage>);
 
     procedure EditMessageMedia(const AMessage: TTelegramMessage; const AMedia: string; const ACaption: string = '';
       const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil);
@@ -121,7 +123,7 @@ begin
       vParams.Append('show_alert=true');
     end;
 
-    PostMethodAsync('answerCallbackQuery', vParams, nil);
+    PostMethodAsync('answerCallbackQuery', vParams, tqkControl, nil);
   finally
     FreeAndNil(vParams);
   end;
@@ -145,7 +147,7 @@ begin
       vCommandsJSON.Add(vCommandObj);
     end;
     vParams.Append('commands=' + vCommandsJSON.ToJSON);
-    PostMethodAsync('setMyCommands', vParams, nil);
+    PostMethodAsync('setMyCommands', vParams, tqkControl, nil);
   finally
     FreeAndNil(vCommandsJSON);
     FreeAndNil(vParams);
@@ -161,7 +163,7 @@ begin
     vParams.Append('description=' + ADescription);
     if ALanguageCode <> '' then
       vParams.Append('language_code=' + ALanguageCode);
-    PostMethodAsync('setMyDescription', vParams, nil);
+    PostMethodAsync('setMyDescription', vParams, tqkControl, nil);
   finally
     FreeAndNil(vParams);
   end;
@@ -176,23 +178,25 @@ begin
     vParams.Append('short_description=' + AShortDescription);
     if ALanguageCode <> '' then
       vParams.Append('language_code=' + ALanguageCode);
-    PostMethodAsync('setMyShortDescription', vParams, nil);
+    PostMethodAsync('setMyShortDescription', vParams, tqkControl, nil);
   finally
     FreeAndNil(vParams);
   end;
 end;
 
-function TTelegramBot.CopyMessage(const ATargetChat, AFromChat: string; const AMessageId: Integer): string;
+function TTelegramBot.CopyMessage(const ATargetChat, AFromChat: string; const AMessageId: Integer;
+  const AOnSent: TProc<string>; const AKind: TTelegramQueueKind): string;
 var
   vParams: TStringList;
 begin
+  Result := '';
   vParams := TStringList.Create;
   try
     vParams.Append('chat_id=' + ATargetChat);
     vParams.Append('from_chat_id=' + AFromChat);
     vParams.Append('message_id=' + IntToStr(AMessageId));
 
-    PostMethodAsync('copyMessage', vParams);
+    PostMethodAsync('copyMessage', vParams, AKind, nil, AOnSent);
   finally
     FreeAndNil(vParams);
   end;
@@ -200,16 +204,27 @@ end;
 
 procedure TTelegramBot.CopyMessage(const ATargetChat: string; const AMessage: TTelegramMessage);
 var
-  vAnswer, vResult: TJSONObject;
+  vOnSent: TProc<string>;
 begin
-  try
-    vAnswer := TJSONObject.LoadFromText(CopyMessage(ATargetChat, AMessage.Chat, AMessage.MessageId));
-    vResult := vAnswer.ExtractObject('result');
-    AMessage.MessageId := vResult.ExtractInteger('message_id');
-    AMessage.Chat := ATargetChat;
-  finally
-    FreeAndNil(vAnswer);
-  end;
+  vOnSent :=
+    procedure(AResponse: string)
+    var
+      vAnswer, vResult: TJSONObject;
+    begin
+      vAnswer := TJSONObject.LoadFromText(AResponse);
+      try
+        if not Assigned(vAnswer) then
+          Exit;
+        vResult := vAnswer.ExtractObject('result');
+        if not Assigned(vResult) then
+          Exit;
+        AMessage.MessageId := vResult.ExtractInteger('message_id');
+        AMessage.Chat := ATargetChat;
+      finally
+        FreeAndNil(vAnswer);
+      end;
+    end;
+  CopyMessage(ATargetChat, AMessage.Chat, AMessage.MessageId, vOnSent);
 end;
 
 constructor TTelegramBot.Create(const AToken: string);
@@ -262,7 +277,7 @@ begin
   try
     vParams.Append('chat_id=' + AMessage.Chat);
     vParams.Append('message_id=' + IntToStr(AMessage.MessageId));
-    PostMethodAsync('deleteMessage', vParams);
+    PostMethodAsync('deleteMessage', vParams, tqkControl);
   finally
     FreeAndNil(vParams);
   end;
@@ -277,10 +292,11 @@ begin
 end;
 
 function TTelegramBot.EditMessageText(const AMessage: TTelegramMessage; const AText: string;
-  const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil): string;
+  const AReplyMarkup: TTelegramInlineKeyboardMarkup; const AOnSent: TProc<string>): string;
 var
   vParams: TStringList;
 begin
+  Result := '';
   if not Assigned(AMessage) then
     Exit;
   vParams := TStringList.Create;
@@ -290,29 +306,39 @@ begin
     vParams.Append('text=' + AText);
     AMessage.Text := AText;
 
-    Result := PostMethod('editMessageText', vParams, AReplyMarkup);
+    PostMethodAsync('editMessageText', vParams, tqkControl, AReplyMarkup, AOnSent);
   finally
     FreeAndNil(vParams);
   end;
 end;
 
-function TTelegramBot.EditMessageTextResulted(const AMessage: TTelegramMessage; const AText: string;
-  const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil): TTelegramMessage;
-var
-  vJSON, vResult: TJSONObject;
+procedure TTelegramBot.EditMessageTextResulted(const AMessage: TTelegramMessage; const AText: string;
+  const AReplyMarkup: TTelegramInlineKeyboardMarkup; const AOnSent: TProc<TTelegramMessage>);
 begin
-  Result := nil;
   if not Assigned(AMessage) then
+  begin
+    if Assigned(AOnSent) then
+      AOnSent(nil);
     Exit;
-  try
-    vJSON := TJSONObject.LoadFromText(EditMessageText(AMessage, AText, AReplyMarkup));
-    vResult := vJSON.ExtractObject('result');
-    Result := nil;
-    if Assigned(vResult) then
-      Result := TTelegramMessage.Create(vResult);
-  finally
-    FreeAndNil(vJSON);
   end;
+  EditMessageText(AMessage, AText, AReplyMarkup,
+    procedure(AResponse: string)
+    var
+      vJSON, vResultObj: TJSONObject;
+      vMessage: TTelegramMessage;
+    begin
+      vMessage := nil;
+      vJSON := TJSONObject.LoadFromText(AResponse);
+      try
+        vResultObj := vJSON.ExtractObject('result');
+        if Assigned(vResultObj) then
+          vMessage := TTelegramMessage.Create(vResultObj);
+      finally
+        FreeAndNil(vJSON);
+      end;
+      if Assigned(AOnSent) then
+        AOnSent(vMessage);
+    end);
 end;
 
 function TTelegramBot.ForwardMessage(const AMessage: TTelegramMessage; const ATelegramId: string): string;
@@ -355,41 +381,55 @@ end;
 procedure TTelegramBot.EditMessageMedia(const AMessage: TTelegramMessage; const AMedia: string;
   const ACaption: string = ''; const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil);
 var
-  vTargetUrl: string;
-  vMPD: TMultipartFormData;
-  vMedia: TJSONObject;
+  vTargetUrl, vChatId, vReplyMarkupText, vMediaText, vFilePath: string;
+  vMessageId: Integer;
+  vIsFile: Boolean;
+  vMediaJSON: TJSONObject;
 begin
   if not Assigned(AMessage) then
     Exit;
   vTargetUrl := FBotUrl + '/editMessageMedia';
-  vMPD := TMultipartFormData.Create;
+  vChatId := AMessage.Chat;
+  vMessageId := AMessage.MessageId;
+  vReplyMarkupText := '';
+  if Assigned(AReplyMarkup) then
+    vReplyMarkupText := AReplyMarkup.ToString;
+
+  vIsFile := Pos('.', AMedia) > 0;
+  vFilePath := AMedia;
+  vMediaJSON := TJSONObject.Create;
   try
-    vMPD.AddField('chat_id', AMessage.Chat);
-    vMPD.AddField('message_id', IntToStr(AMessage.MessageId));
-    vMedia := TJSONObject.Create;
-    vMedia.StoreString('type', 'photo');
+    vMediaJSON.StoreString('type', 'photo');
     if ACaption <> '' then
-      vMedia.StoreString('caption', ACaption);
-    if Assigned(AReplyMarkup) then
-      vMPD.AddField('reply_markup', AReplyMarkup.ToString);
-
-    if Pos('.', AMedia) > 0 then
-    begin
-      vMedia.StoreString('media', 'attach://photo');
-      vMPD.AddField('media', vMedia.ToJSON);
-      vMPD.AddFile('photo', AMedia);
-    end
+      vMediaJSON.StoreString('caption', ACaption);
+    if vIsFile then
+      vMediaJSON.StoreString('media', 'attach://photo')
     else
-    begin
-      vMedia.StoreString('media', AMedia);
-      vMPD.AddField('media', vMedia.ToJSON);
-    end;
-
-    FHTTPClient.Post(vTargetUrl, vMPD);
+      vMediaJSON.StoreString('media', AMedia);
+    vMediaText := vMediaJSON.ToJSON;
   finally
-    FreeAndNil(vMPD);
-    vTargetUrl := '';
+    FreeAndNil(vMediaJSON);
   end;
+
+  TTelegramSendQueue.Enqueue(
+    procedure
+    var
+      vMPD: TMultipartFormData;
+    begin
+      vMPD := TMultipartFormData.Create;
+      try
+        vMPD.AddField('chat_id', vChatId);
+        vMPD.AddField('message_id', IntToStr(vMessageId));
+        vMPD.AddField('media', vMediaText);
+        if vIsFile then
+          vMPD.AddFile('photo', vFilePath);
+        if vReplyMarkupText <> '' then
+          vMPD.AddField('reply_markup', vReplyMarkupText);
+        TTelegramSendQueue.HTTPClient(tqkControl).Post(vTargetUrl, vMPD);
+      finally
+        FreeAndNil(vMPD);
+      end;
+    end, tqkControl);
 end;
 
 procedure TTelegramBot.EditMessageReplyMarkup(const AMessage: TTelegramMessage;
@@ -404,7 +444,7 @@ begin
     vParams.Append('chat_id=' + AMessage.Chat);
     vParams.Append('message_id=' + IntToStr(AMessage.MessageId));
 
-    PostMethodAsync('editMessageReplyMarkup', vParams, AReplyMarkup);
+    PostMethodAsync('editMessageReplyMarkup', vParams, tqkControl, AReplyMarkup);
   finally
     FreeAndNil(vParams);
   end;
@@ -421,7 +461,7 @@ begin
     vParams.Append('document=' + ADocumentId);
     if Length(AText) > 0 then
       vParams.Append('caption=' + AText);
-    PostMethodAsync('sendDocument', vParams, AReplyMarkup);
+    PostMethodAsync('sendDocument', vParams, tqkSend, AReplyMarkup);
   finally
     FreeAndNil(vParams);
   end;
@@ -429,23 +469,31 @@ end;
 
 procedure TTelegramBot.SendFile(const AChatId, AFilename, AText: string);
 var
-  vTargetUrl: string;
-  vMPD: TMultipartFormData;
-  LFileStream: TFileStream;
+  vTargetUrl, vChatId, vText, vFileName: string;
 begin
   vTargetUrl := FBotUrl + '/sendDocument';
-  vMPD := TMultipartFormData.Create;
-  try
-    vMPD.AddField('chat_id', AChatId);
-    if AText <> '' then
-      vMPD.AddField('text', AText);
-    LFileStream := TFileStream.Create(AFilename, fmOpenRead or fmShareDenyNone);
-    vMPD.AddStream('document', LFileStream, True, ExtractFileName(AFilename));
-    FHTTPClient.Post(vTargetUrl, vMPD);
-  finally
-    FreeAndNil(vMPD);
-    vTargetUrl := '';
-  end
+  vChatId := AChatId;
+  vText := AText;
+  vFileName := AFilename;
+
+  TTelegramSendQueue.Enqueue(
+    procedure
+    var
+      vMPD: TMultipartFormData;
+      vFileStream: TFileStream;
+    begin
+      vMPD := TMultipartFormData.Create;
+      try
+        vMPD.AddField('chat_id', vChatId);
+        if vText <> '' then
+          vMPD.AddField('text', vText);
+        vFileStream := TFileStream.Create(vFileName, fmOpenRead or fmShareDenyNone);
+        vMPD.AddStream('document', vFileStream, True, ExtractFileName(vFileName));
+        TTelegramSendQueue.HTTPClient(tqkSend).Post(vTargetUrl, vMPD);
+      finally
+        FreeAndNil(vMPD);
+      end;
+    end, tqkSend);
 end;
 
 procedure TTelegramBot.SendMediaGroup(const AChatId: string; const AMedia: TList<string>;
@@ -474,7 +522,7 @@ begin
       TJSONObject(vMediaGroup.Items[0]).StoreString('caption', AText);
     vParams.Append('media=' + vMediaGroup.ToJSON);
 
-    PostMethodAsync('sendMediaGroup', vParams, nil);
+    PostMethodAsync('sendMediaGroup', vParams, tqkSend, nil);
   finally
     FreeAndNil(vMediaGroup);
     FreeAndNil(vParams);
@@ -482,39 +530,42 @@ begin
 end;
 
 function TTelegramBot.SendMessage(const AChatId, AText: string; const AReplyMarkup: TTelegramKeyboardMarkup;
-  const ASync: Boolean): string;
+  const AOnSent: TProc<string>; const AKind: TTelegramQueueKind): string;
 var
   vParams: TStringList;
 begin
-  vParams := TStringList.Create;
   Result := '';
+  vParams := TStringList.Create;
   try
     vParams.Append('chat_id=' + AChatId);
     vParams.Append('text=' + AText);
-    if ASync then
-      Result := PostMethod('sendMessage', vParams, AReplyMarkup)
-    else
-      Result := PostMethod('sendMessage', vParams, AReplyMarkup);
+    PostMethodAsync('sendMessage', vParams, AKind, AReplyMarkup, AOnSent);
   finally
     FreeAndNil(vParams);
   end;
 end;
 
-function TTelegramBot.SendMessageResulted(const AChatId, AText: string; const AReplyMarkup: TTelegramKeyboardMarkup)
-  : TTelegramMessage;
-var
-  vJSON: TJSONObject;
-  vResult: TJSONObject;
+procedure TTelegramBot.SendMessageResulted(const AChatId, AText: string; const AReplyMarkup: TTelegramKeyboardMarkup;
+  const AOnSent: TProc<TTelegramMessage>);
 begin
-  try
-    Result := nil;
-    vJSON := TJSONObject.LoadFromText(SendMessage(AChatId, AText, AReplyMarkup, True));
-    vResult := vJSON.ExtractObject('result');
-    if Assigned(vResult) then
-      Result := TTelegramMessage.Create(vResult);
-  finally
-    FreeAndNil(vJSON);
-  end;
+  SendMessage(AChatId, AText, AReplyMarkup,
+    procedure(AResponse: string)
+    var
+      vJSON, vResultObj: TJSONObject;
+      vMessage: TTelegramMessage;
+    begin
+      vMessage := nil;
+      vJSON := TJSONObject.LoadFromText(AResponse);
+      try
+        vResultObj := vJSON.ExtractObject('result');
+        if Assigned(vResultObj) then
+          vMessage := TTelegramMessage.Create(vResultObj);
+      finally
+        FreeAndNil(vJSON);
+      end;
+      if Assigned(AOnSent) then
+        AOnSent(vMessage);
+    end);
 end;
 
 function TTelegramBot.SendPhotoResulted(const AChatId, APhotoId: string): string;
@@ -539,58 +590,87 @@ begin
 end;
 
 function TTelegramBot.SendPhoto(const AChatId, APhotoId, AText: string; const AReplyMarkup: TTelegramKeyboardMarkup;
-  const ASpoiler: Boolean): string;
+  const ASpoiler: Boolean; const AOnSent: TProc<string>; const AKind: TTelegramQueueKind): string;
 var
-  vTargetUrl: string;
-  vMPD: TMultipartFormData;
+  vTargetUrl, vChatId, vPhotoId, vText, vReplyMarkupText: string;
+  vSpoiler, vIsFile: Boolean;
+  vKind: TTelegramQueueKind;
 begin
+  Result := '';
   vTargetUrl := FBotUrl + '/sendPhoto';
-  vMPD := TMultipartFormData.Create;
-  try
-    vMPD.AddField('chat_id', AChatId);
-    vMPD.AddField('has_spoiler', BoolToStr(ASpoiler, True));
+  vChatId := AChatId;
+  vPhotoId := APhotoId;
+  vText := AText;
+  vSpoiler := ASpoiler;
+  vIsFile := Pos('.', APhotoId) > 0;
+  vReplyMarkupText := '';
+  vKind := AKind;
+  if Assigned(AReplyMarkup) then
+    vReplyMarkupText := AReplyMarkup.ToString;
 
-    if AText <> '' then
-      vMPD.AddField('caption', AText);
-
-    if Pos('.', APhotoId) > 0 then
-      vMPD.AddFile('photo', APhotoId)
-    else
-      vMPD.AddField('photo', APhotoId);
-
-    if Assigned(AReplyMarkup) then
-      vMPD.AddField('reply_markup', AReplyMarkup.ToString);
-
-    Result := FHTTPClient.Post(vTargetUrl, vMPD).ContentAsString;
-  finally
-    FreeAndNil(vMPD);
-  end;
+  TTelegramSendQueue.EnqueueWithCallback<string>(
+    function: string
+    var
+      vMPD: TMultipartFormData;
+    begin
+      Result := '';
+      vMPD := TMultipartFormData.Create;
+      try
+        vMPD.AddField('chat_id', vChatId);
+        vMPD.AddField('has_spoiler', BoolToStr(vSpoiler, True));
+        if vText <> '' then
+          vMPD.AddField('caption', vText);
+        if vIsFile then
+          vMPD.AddFile('photo', vPhotoId)
+        else
+          vMPD.AddField('photo', vPhotoId);
+        if vReplyMarkupText <> '' then
+          vMPD.AddField('reply_markup', vReplyMarkupText);
+        Result := TTelegramSendQueue.HTTPClient(vKind).Post(vTargetUrl, vMPD).ContentAsString;
+      finally
+        FreeAndNil(vMPD);
+      end;
+    end,
+    AOnSent, AKind);
 end;
 
 function TTelegramBot.SendPhoto(const AChatId: string; const AStream: TStream; const AFileName, AText: string;
   const AReplyMarkup: TTelegramKeyboardMarkup; const ASpoiler: Boolean): string;
 var
-  vTargetUrl: string;
-  vMPD: TMultipartFormData;
+  vTargetUrl, vChatId, vFileName, vText, vReplyMarkupText: string;
+  vSpoiler: Boolean;
+  vOwnedStream: TStream;
 begin
+  Result := '';
   vTargetUrl := FBotUrl + '/sendPhoto';
-  vMPD := TMultipartFormData.Create;
-  try
-    vMPD.AddField('chat_id', AChatId);
-    vMPD.AddField('has_spoiler', BoolToStr(ASpoiler, True));
+  vChatId := AChatId;
+  vFileName := AFileName;
+  vText := AText;
+  vSpoiler := ASpoiler;
+  vOwnedStream := AStream;
+  vReplyMarkupText := '';
+  if Assigned(AReplyMarkup) then
+    vReplyMarkupText := AReplyMarkup.ToString;
 
-    if AText <> '' then
-      vMPD.AddField('caption', AText);
-
-    vMPD.AddStream('photo', AStream, True, AFileName);
-
-    if Assigned(AReplyMarkup) then
-      vMPD.AddField('reply_markup', AReplyMarkup.ToString);
-
-    Result := FHTTPClient.Post(vTargetUrl, vMPD).ContentAsString;
-  finally
-    FreeAndNil(vMPD);
-  end;
+  TTelegramSendQueue.Enqueue(
+    procedure
+    var
+      vMPD: TMultipartFormData;
+    begin
+      vMPD := TMultipartFormData.Create;
+      try
+        vMPD.AddField('chat_id', vChatId);
+        vMPD.AddField('has_spoiler', BoolToStr(vSpoiler, True));
+        if vText <> '' then
+          vMPD.AddField('caption', vText);
+        vMPD.AddStream('photo', vOwnedStream, True, vFileName);
+        if vReplyMarkupText <> '' then
+          vMPD.AddField('reply_markup', vReplyMarkupText);
+        TTelegramSendQueue.HTTPClient(tqkSend).Post(vTargetUrl, vMPD);
+      finally
+        FreeAndNil(vMPD);
+      end;
+    end, tqkSend);
 end;
 
 procedure TTelegramBot.SetBotToken(const Value: string);
@@ -623,21 +703,33 @@ begin
   end;
 end;
 
-function TTelegramBot.GetFile(const AFileId: string): string;
+procedure TTelegramBot.GetFile(const AFileId: string; const AOnSent: TProc<string>);
 var
   vParams: TStringList;
-  vResult, vRes: TJSONObject;
 begin
-  Result := '';
   vParams := TStringList.Create;
   try
     vParams.Append('file_id=' + AFileId);
-    vResult := TJSONObject.LoadFromText(PostMethod('getFile', vParams));
-    vRes := vResult.ExtractObject('result');
-    Result := vRes.ExtractString('file_path');
+    PostMethodAsync('getFile', vParams, tqkControl, nil,
+      procedure(AResponse: string)
+      var
+        vResult, vRes: TJSONObject;
+        vFilePath: string;
+      begin
+        vFilePath := '';
+        vResult := TJSONObject.LoadFromText(AResponse);
+        try
+          vRes := vResult.ExtractObject('result');
+          if Assigned(vRes) then
+            vFilePath := vRes.ExtractString('file_path');
+        finally
+          FreeAndNil(vResult);
+        end;
+        if Assigned(AOnSent) then
+          AOnSent(vFilePath);
+      end);
   finally
     FreeAndNil(vParams);
-    FreeAndNil(vResult);
   end;
 end;
 
@@ -683,29 +775,39 @@ begin
 end;
 
 procedure TTelegramBot.PostMethodAsync(const AMethodName: string; const AParams: TStringList;
-  const AReplyMarkup: TTelegramKeyboardMarkup);
-// var
-// vTargetUrl: string;
-// vMPD: TMultipartFormData;
-// I: Integer;
+  const AKind: TTelegramQueueKind; const AReplyMarkup: TTelegramKeyboardMarkup; const AOnSent: TProc<string>);
+var
+  vTargetUrl: string;
+  vParamsCopy: TStringList;
+  vReplyMarkupText: string;
 begin
-  PostMethod(AMethodName, AParams, AReplyMarkup);
-  // vTargetUrl := FBotUrl + '/' + AMethodName;
-  // vMPD := TMultipartFormData.Create;
-  // for I := 0 to AParams.Count - 1 do
-  // vMPD.AddField(AParams.Names[I], AParams.Values[AParams.Names[I]]);
-  // if Assigned(AReplyMarkup) then
-  // vMPD.AddField('reply_markup', AReplyMarkup.ToString);
-  // TThreadPool.Current.QueueWorkItem(procedure
-  // var
-  // vResult: string;
-  // begin
-  // try
-  // vResult := FHTTPClient.Post(TNetEncoding.URL.Encode(vTargetUrl, [], [TURLEncoding.TEncodeOption.SpacesAsPlus]), vMPD).ContentAsString;
-  // finally
-  // FreeAndNil(vMPD);
-  // end
-  // end);
+  vTargetUrl := TNetEncoding.Url.Encode(FBotUrl + '/' + AMethodName, [], [TURLEncoding.TEncodeOption.SpacesAsPlus]);
+  vParamsCopy := TStringList.Create;
+  vParamsCopy.Assign(AParams);
+  vReplyMarkupText := '';
+  if Assigned(AReplyMarkup) then
+    vReplyMarkupText := AReplyMarkup.ToString;
+
+  TTelegramSendQueue.EnqueueWithCallback<string>(
+    function: string
+    var
+      vMPD: TMultipartFormData;
+      I: Integer;
+    begin
+      Result := '';
+      vMPD := TMultipartFormData.Create;
+      try
+        for I := 0 to vParamsCopy.Count - 1 do
+          vMPD.AddField(vParamsCopy.Names[I], vParamsCopy.Values[vParamsCopy.Names[I]]);
+        if vReplyMarkupText <> '' then
+          vMPD.AddField('reply_markup', vReplyMarkupText);
+        Result := TTelegramSendQueue.HTTPClient(AKind).Post(vTargetUrl, vMPD).ContentAsString;
+      finally
+        FreeAndNil(vMPD);
+        vParamsCopy.Free;
+      end;
+    end,
+    AOnSent, AKind);
 end;
 
 function TTelegramBot.GetUpdate: TJSONObject;
@@ -722,7 +824,7 @@ begin
   vParams := TStringList.Create;
   vParams.Add('offset=' + IntToStr(FLastUpdate));
   vParams.Add('limit=1');
-  vParams.Add('timeout=5');
+  vParams.Add('timeout=1');
   vAnswer := TJSONObject.LoadFromText(PostMethod('getUpdates', vParams));
   try
     if Assigned(vAnswer) then
