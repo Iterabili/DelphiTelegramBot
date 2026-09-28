@@ -196,6 +196,7 @@ type
     function AwaitTextOrPhoto(const APrompt: string; out AText, APhoto: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
     function AwaitPhotoOrDocument(const APrompt: string; out APhoto, ADocument: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
     function AwaitContact(const APrompt: string; out APhone, AOwner: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
+    function AwaitContactOrText(const APrompt: string; out APhone, AOwner, AText: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
     function AwaitUsername(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
     procedure AwaitTimeRange(const APrompt: string; out AFrom, ATo: TDateTime; const ACancelButton: string = ''; ACancelData: TCallbackData = nil);
     function AwaitButton(const APrompt: string; const AActions, ACaptions: array of string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
@@ -247,6 +248,7 @@ type
     FPendingSendResults: TThreadList<TPendingSendResult>;
     FNextSendToken: Int64;
     function InternalExecuteCalbackAction(const ACallback: TTelegramCallbackQuery): Boolean;
+    function IsCommandMessage(const AMessage: TTelegramMessage): Boolean;
     function TryResumeFlowWithMessage(const AMessage: TTelegramMessage): Boolean;
     function HandleRegisteredMessages(const AMessage: TTelegramMessage): Boolean;
     function DispatchCommandMessage(const AMessage: TTelegramMessage): Boolean;
@@ -273,6 +275,7 @@ type
     procedure LoadButtonIds;
     procedure SaveButtonIds;
     function CheckButtonAdd(const AButton, ATelegramId, AData: string): Boolean; virtual;
+    procedure DoBeforeDispatchUpdate; override;
     function DoOnMessage(const AMessage: TTelegramMessage): Boolean; override;
     function DoOnCallbackQuery(const ACallbackQuery: TTelegramCallbackQuery): Boolean; override;
 
@@ -325,9 +328,9 @@ type
       const ACancelBtn: string = ''; const  APhoto: string = '');
 
 
-    function AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: TCallbackData = nil; const ACaption: string = ''; const ARow: Integer = -1): Integer; overload;
-    function AppendMenuKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton, ATelegramId: string; const AData: TCallbackData; const ACaption: string = ''; const ARow: Integer = -1): Boolean; overload;
-    function AppendMenuKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton, ATelegramId, AData: string; const ACaption: string = ''; const ARow: Integer = -1): Boolean; overload;
+    function AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: TCallbackData = nil; const ACaption: string = ''; const ARow: Integer = -1; const AStyle: TTelegramButtonStyle = tbsNone): Integer; overload;
+    function AppendMenuKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton, ATelegramId: string; const AData: TCallbackData; const ACaption: string = ''; const ARow: Integer = -1; const AStyle: TTelegramButtonStyle = tbsNone): Boolean; overload;
+    function AppendMenuKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton, ATelegramId, AData: string; const ACaption: string = ''; const ARow: Integer = -1; const AStyle: TTelegramButtonStyle = tbsNone): Boolean; overload;
     //todo: add captions
     procedure SendConfirmation(const AMessage: TTelegramMessage; const ATelegramId, AText, AAction: string; const AOwnedData: TCallbackData; const APhoto: string = ''; const ADocument: string = ''); overload;
     procedure SendConfirmationResulted(const AMessage: TTelegramMessage; const ATelegramId, AText, AAction: string;
@@ -711,6 +714,16 @@ begin
   end;
 end;
 
+function ExtractDigits(const AText: string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 1 to Length(AText) do
+    if (AText[I] >= '0') and (AText[I] <= '9') then
+      Result := Result + AText[I];
+end;
+
 function TFlowContext.AwaitContact(const APrompt: string; out APhone, AOwner: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
 var
   vKeyboardReq: TTelegramReplyKeyboardMarkup;
@@ -719,7 +732,6 @@ var
   vClearMsg: TTelegramMessage;
   vEmptyKeyboard: TTelegramReplyKeyboardRemove;
   vPhone: string;
-  vPhoneNumber: Int64;
 begin
   vKeyboardReq := TTelegramReplyKeyboardMarkup.Create(
     [[TTelegramReplyKeyboardButton.Create('Отправить контакт').RequestContact]]);
@@ -736,10 +748,7 @@ begin
       SwitchToScheduler;
       if Assigned(FPendingMessage.Contact) then
       begin
-        vPhone := FPendingMessage.Contact.Phone;
-        if (Length(vPhone) > 0) and (vPhone[1] = '+') then
-          vPhone := Copy(vPhone, 2, Length(vPhone) - 1);
-        APhone := vPhone;
+        APhone := ExtractDigits(FPendingMessage.Contact.Phone);
         AOwner := FPendingMessage.Contact.UserId;
         vEmptyKeyboard := TTelegramReplyKeyboardRemove.Create;
         vClearMsg := SendPromptResulted('clear', vEmptyKeyboard);
@@ -749,18 +758,74 @@ begin
         Result := True;
         Break;
       end
-      else if Length(FPendingMessage.Text) > 10 then
+      else
       begin
-        vPhone := FPendingMessage.Text;
-        if (Length(vPhone) > 0) and (vPhone[1] = '+') then
-          vPhone := Copy(vPhone, 2, Length(vPhone) - 1);
-        if TryStrToInt64(vPhone, vPhoneNumber) then
+        vPhone := ExtractDigits(FPendingMessage.Text);
+        if Length(vPhone) >= 10 then
         begin
           APhone := vPhone;
           AOwner := '';
           Result := True;
           Break;
-        end;
+        end
+        else
+          FBot.SendMessage(FChatId,
+            'Не удалось распознать номер телефона в сообщении. Введите номер цифрами или отправьте контакт.');
+      end;
+    end;
+  finally
+    FBot.DeleteKeyboard(vMsg);
+    FreeAndNil(vMsg);
+  end;
+end;
+
+function TFlowContext.AwaitContactOrText(const APrompt: string; out APhone, AOwner, AText: string;
+  const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
+var
+  vKeyboardReq: TTelegramReplyKeyboardMarkup;
+  vKeyboard: TTelegramInlineKeyboardMarkup;
+  vMsg: TTelegramMessage;
+  vClearMsg: TTelegramMessage;
+  vEmptyKeyboard: TTelegramReplyKeyboardRemove;
+  vPhone: string;
+begin
+  APhone := '';
+  AOwner := '';
+  AText := '';
+  vKeyboardReq := TTelegramReplyKeyboardMarkup.Create(
+    [[TTelegramReplyKeyboardButton.Create('Отправить контакт').RequestContact]]);
+  vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
+  FreeAndNil(ACancelData);
+  vMsg := SendPromptResulted(APrompt, vKeyboardReq);
+  FBot.EditMessageReplyMarkup(vMsg, vKeyboard);
+  FreeAndNil(vKeyboardReq);
+  FreeAndNil(vKeyboard);
+  try
+    FPendingType := fptMessage;
+    SwitchToScheduler;
+    if Assigned(FPendingMessage.Contact) then
+    begin
+      APhone := ExtractDigits(FPendingMessage.Contact.Phone);
+      AOwner := FPendingMessage.Contact.UserId;
+      vEmptyKeyboard := TTelegramReplyKeyboardRemove.Create;
+      vClearMsg := SendPromptResulted('clear', vEmptyKeyboard);
+      FBot.DeleteMessage(vClearMsg);
+      FreeAndNil(vClearMsg);
+      FreeAndNil(vEmptyKeyboard);
+      Result := True;
+    end
+    else
+    begin
+      vPhone := ExtractDigits(FPendingMessage.Text);
+      if Length(vPhone) >= 10 then
+      begin
+        APhone := vPhone;
+        Result := True;
+      end
+      else
+      begin
+        AText := Trim(FPendingMessage.Text);
+        Result := False;
       end;
     end;
   finally
@@ -858,7 +923,10 @@ begin
   vSavedCancelButton := FCancelButton;
   FCancelButton := vEffectiveCancel;
   try
-    FAwaiterMessageId := vMsg.MessageId;
+    if Assigned(vMsg) then
+      FAwaiterMessageId := vMsg.MessageId
+    else
+      FAwaiterMessageId := -1;
     FPendingType := fptCallback;
     FPendingAction := '';
     SwitchToScheduler;
@@ -887,7 +955,10 @@ begin
   vMsg := SendPromptResulted(APrompt, vKeyboard);
   FreeAndNil(vKeyboard);
   try
-    FAwaiterMessageId := vMsg.MessageId;
+    if Assigned(vMsg) then
+      FAwaiterMessageId := vMsg.MessageId
+    else
+      FAwaiterMessageId := -1;
     FPendingAction := '';
     while True do
     begin
@@ -923,7 +994,10 @@ begin
   vSavedCancelButton := FCancelButton;
   FCancelButton := vEffectiveCancel;
   try
-    FAwaiterMessageId := vMsg.MessageId;
+    if Assigned(vMsg) then
+      FAwaiterMessageId := vMsg.MessageId
+    else
+      FAwaiterMessageId := -1;
     FPendingType := fptCallback;
     FPendingDate := 0;
     SwitchToScheduler;
@@ -992,6 +1066,19 @@ begin
   SendMessage(AChatId, 'Произошла ошибка. Попробуйте ещё раз.');
 end;
 
+function TTelegramBotEx.IsCommandMessage(const AMessage: TTelegramMessage): Boolean;
+var
+  vText: string;
+begin
+  Result := False;
+  if not Assigned(AMessage) then
+    Exit;
+  if (AMessage.Photo <> '') or (AMessage.Document <> '') or Assigned(AMessage.Contact) then
+    Exit;
+  vText := Trim(AMessage.Text);
+  Result := (vText <> '') and (vText[1] = '/');
+end;
+
 function TTelegramBotEx.TryResumeFlowWithMessage(const AMessage: TTelegramMessage): Boolean;
 var
   vState: TFlowState;
@@ -1004,6 +1091,13 @@ begin
   if not FActiveFlows.TryGetValue(AMessage.From.Id, vState) then
     Exit;
 
+  if vState.Context.FPendingType = fptAsyncSend then
+  begin
+    ProcessPendingSendResults;
+    if not FActiveFlows.TryGetValue(AMessage.From.Id, vState) then
+      Exit;
+  end;
+
   // Type mismatch: Flow ждёт кнопку, но пришёл текст → тихо завершаем, текст идёт дальше
   if vState.Context.FPendingType = fptCallback then
   begin
@@ -1013,6 +1107,12 @@ begin
 
   if not (vState.Context.FPendingType in [fptMessage, fptMessageOrCallback]) then
     Exit;
+
+  if IsCommandMessage(AMessage) then
+  begin
+    SilentTerminateFlow(AMessage.From.Id, vState);
+    Exit(False);
+  end;
 
   vState.Context.FPendingMessage := AMessage;
   vState.Context.FPendingAction := '';
@@ -1039,6 +1139,13 @@ begin
   vChatId := '';
   if not FActiveFlows.TryGetValue(ACallback.From.Id, vState) then
     Exit;
+
+  if vState.Context.FPendingType = fptAsyncSend then
+  begin
+    ProcessPendingSendResults;
+    if not FActiveFlows.TryGetValue(ACallback.From.Id, vState) then
+      Exit;
+  end;
 
   vCallbackData := TCallbackData.Create(ACallback.Data);
   try
@@ -1141,10 +1248,18 @@ begin
   end;
 end;
 
+procedure TTelegramBotEx.DoBeforeDispatchUpdate;
+begin
+  ProcessPendingSendResults;
+end;
+
 procedure TTelegramBotEx.Poll;
 begin
-  inherited;
-  ProcessPendingSendResults;
+  try
+    inherited;
+  finally
+    ProcessPendingSendResults;
+  end;
 end;
 
 procedure TTelegramBotEx.Initialize;
@@ -1204,6 +1319,8 @@ begin
       Exit(False);
 
     vBId := vCallbackData.GetInteger(0);
+    if not FSimpleButtons.ContainsKey(vBId) then
+      Exit(False);
     vButton := FSimpleButtons[vBId].Name;
 
     if FTypedHandlers.TryGetValue(vButton, vTypedHandler) then
@@ -1274,7 +1391,7 @@ begin
 end;
 
 
-function TTelegramBotEx.AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: TCallbackData = nil; const ACaption: string = ''; const ARow: Integer = -1): Integer;
+function TTelegramBotEx.AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: TCallbackData = nil; const ACaption: string = ''; const ARow: Integer = -1; const AStyle: TTelegramButtonStyle = tbsNone): Integer;
 var
   vButton: TSimpleButton;
   vCaption: string;
@@ -1304,9 +1421,9 @@ begin
   try
     vCallbackData.Serialize;
     if vCallbackData.Count > 0 then
-      Result := AKeyboard.AddButton(vCaption, IntToStr(vButton.Id) + ' ' + vCallbackData.ToString, ARow)
+      Result := AKeyboard.AddButton(vCaption, IntToStr(vButton.Id) + ' ' + vCallbackData.ToString, ARow, AStyle)
     else
-      Result := AKeyboard.AddButton(vCaption, IntToStr(vButton.Id), ARow);
+      Result := AKeyboard.AddButton(vCaption, IntToStr(vButton.Id), ARow, AStyle);
   finally
     if vOwnsData then
       FreeAndNil(vCallbackData);
@@ -1325,7 +1442,7 @@ begin
   end;
 end;
 
-function TTelegramBotEx.AppendMenuKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton, ATelegramId: string; const AData: TCallbackData; const ACaption: string; const ARow: Integer): Boolean;
+function TTelegramBotEx.AppendMenuKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton, ATelegramId: string; const AData: TCallbackData; const ACaption: string; const ARow: Integer; const AStyle: TTelegramButtonStyle): Boolean;
 var
   vDataStr: string;
 begin
@@ -1337,10 +1454,10 @@ begin
   end;
   Result := CheckButtonAdd(AButton, ATelegramId, vDataStr);
   if Result then
-    AppendKeyboard(AKeyboard, AButton, AData, ACaption, ARow);
+    AppendKeyboard(AKeyboard, AButton, AData, ACaption, ARow, AStyle);
 end;
 
-function TTelegramBotEx.AppendMenuKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton, ATelegramId, AData, ACaption: string; const ARow: Integer): Boolean;
+function TTelegramBotEx.AppendMenuKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton, ATelegramId, AData, ACaption: string; const ARow: Integer; const AStyle: TTelegramButtonStyle): Boolean;
 var
   vCallbackData: TCallbackData;
 begin
@@ -1352,13 +1469,13 @@ begin
       vCallbackData := TCallbackData.Create;
       try
         vCallbackData.Add(AData);
-        AppendKeyboard(AKeyboard, AButton, vCallbackData, ACaption, ARow);
+        AppendKeyboard(AKeyboard, AButton, vCallbackData, ACaption, ARow, AStyle);
       finally
         FreeAndNil(vCallbackData);
       end;
     end
     else
-      AppendKeyboard(AKeyboard, AButton, nil, ACaption, ARow);
+      AppendKeyboard(AKeyboard, AButton, nil, ACaption, ARow, AStyle);
   end;
 end;
 
@@ -1375,6 +1492,7 @@ begin
   FActionsMap := TDictionary<string, Integer>.Create;
   FActiveFlows := TObjectDictionary<string, TFlowState>.Create([doOwnsValues]);
   FPendingSendResults := TThreadList<TPendingSendResult>.Create;
+  FPendingSendResults.Duplicates := dupAccept;
   FNextSendToken := 0;
   FTypedHandlers := TObjectDictionary<string, TTypedButtonHandler>.Create([doOwnsValues]);
   FTypedActions := TObjectDictionary<string, TTypedActionHandler>.Create([doOwnsValues]);

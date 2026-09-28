@@ -36,6 +36,8 @@ type
     property JSON: TJSONObject read FJSON;
   end;
 
+  TTelegramButtonStyle = (tbsNone, tbsPrimary, tbsDanger, tbsSuccess);
+
   TTelegramInlineKeyboardButton = class(TTelegramKeyboardButton)
   public
     constructor Create(const AText, ACallBackData: string); overload;
@@ -43,6 +45,7 @@ type
     function SetText(const AText: string): TTelegramInlineKeyboardButton;
     function SetCallback(const ACallbackData: string): TTelegramInlineKeyboardButton;
     function SetUrl(const AUrl: string): TTelegramInlineKeyboardButton;
+    function SetStyle(const AStyle: TTelegramButtonStyle): TTelegramInlineKeyboardButton;
     function Clone: TTelegramInlineKeyboardButton;
   end;
 
@@ -83,7 +86,8 @@ type
     procedure AddRow(const AButtons: TTelegramInlineKeyboardButtonsArray);
     function AddButton(const AButton: TTelegramInlineKeyboardButton;
       const ARow: integer = -1): Integer; overload;
-    function AddButton(const AText, AData: string; const ARow: Integer = -1): Integer; overload;
+    function AddButton(const AText, AData: string; const ARow: Integer = -1;
+      const AStyle: TTelegramButtonStyle = tbsNone): Integer; overload;
     function AddUrlButton(const AText, AUrl: string; const ARow: Integer = -1): Integer;
 
     function ToString: string; override;
@@ -328,6 +332,16 @@ begin
   Result := Self;
 end;
 
+function TTelegramInlineKeyboardButton.SetStyle(const AStyle: TTelegramButtonStyle): TTelegramInlineKeyboardButton;
+begin
+  case AStyle of
+    tbsPrimary: FJSON.StoreString('style', 'primary');
+    tbsDanger: FJSON.StoreString('style', 'danger');
+    tbsSuccess: FJSON.StoreString('style', 'success');
+  end;
+  Result := Self;
+end;
+
 function TTelegramInlineKeyboardButton.SetText(const AText: string): TTelegramInlineKeyboardButton;
 begin
   FJSON.StoreString('text', AText);
@@ -411,11 +425,12 @@ begin
 end;
 
 function TTelegramInlineKeyboardMarkup.AddButton(const AText, AData: string;
-  const ARow: Integer = -1): Integer;
+  const ARow: Integer = -1; const AStyle: TTelegramButtonStyle = tbsNone): Integer;
 var
   vButton: TTelegramInlineKeyboardButton;
 begin
   vButton := TTelegramInlineKeyboardButton.Create(AText, AData);
+  vButton.SetStyle(AStyle);
   Result := InternalAddButton(vButton, ARow);
 end;
 

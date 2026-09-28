@@ -36,6 +36,7 @@ type
   protected
     FStartTime: Int64; // unix
     function GetMe: string;
+    procedure DoBeforeDispatchUpdate; virtual;
     function DoOnMessage(const AMessage: TTelegramMessage): Boolean; virtual;
     function DoOnCallbackQuery(const ACallbackQuery: TTelegramCallbackQuery): Boolean; virtual;
   public
@@ -63,7 +64,8 @@ type
       const ASpoiler: Boolean = False): string; overload;
     procedure SendDocument(const AChatId, ADocumentId: string; const AText: string = '';
       const AReplyMarkup: TTelegramKeyboardMarkup = nil);
-    procedure SendFile(const AChatId, AFilename: string; const AText: string = '');
+    procedure SendFile(const AChatId, AFilename: string; const AText: string = '';
+      const AOnSent: TProc<string> = nil);
     procedure GetFile(const AFileId: string; const AOnSent: TProc<string>);
 
     procedure SendMediaGroup(const AChatId: string; const AMedia: TList<string>; const AType: TTelegramMediaType;
@@ -273,6 +275,8 @@ procedure TTelegramBot.DeleteMessage(const AMessage: TTelegramMessage);
 var
   vParams: TStringList;
 begin
+  if not Assigned(AMessage) then
+    Exit;
   vParams := TStringList.Create;
   try
     vParams.Append('chat_id=' + AMessage.Chat);
@@ -330,9 +334,12 @@ begin
       vMessage := nil;
       vJSON := TJSONObject.LoadFromText(AResponse);
       try
-        vResultObj := vJSON.ExtractObject('result');
-        if Assigned(vResultObj) then
-          vMessage := TTelegramMessage.Create(vResultObj);
+        if Assigned(vJSON) then
+        begin
+          vResultObj := vJSON.ExtractObject('result');
+          if Assigned(vResultObj) then
+            vMessage := TTelegramMessage.Create(vResultObj);
+        end;
       finally
         FreeAndNil(vJSON);
       end;
@@ -467,7 +474,7 @@ begin
   end;
 end;
 
-procedure TTelegramBot.SendFile(const AChatId, AFilename, AText: string);
+procedure TTelegramBot.SendFile(const AChatId, AFilename, AText: string; const AOnSent: TProc<string>);
 var
   vTargetUrl, vChatId, vText, vFileName: string;
 begin
@@ -476,12 +483,13 @@ begin
   vText := AText;
   vFileName := AFilename;
 
-  TTelegramSendQueue.Enqueue(
-    procedure
+  TTelegramSendQueue.EnqueueWithCallback<string>(
+    function: string
     var
       vMPD: TMultipartFormData;
       vFileStream: TFileStream;
     begin
+      Result := '';
       vMPD := TMultipartFormData.Create;
       try
         vMPD.AddField('chat_id', vChatId);
@@ -489,11 +497,12 @@ begin
           vMPD.AddField('text', vText);
         vFileStream := TFileStream.Create(vFileName, fmOpenRead or fmShareDenyNone);
         vMPD.AddStream('document', vFileStream, True, ExtractFileName(vFileName));
-        TTelegramSendQueue.HTTPClient(tqkSend).Post(vTargetUrl, vMPD);
+        Result := TTelegramSendQueue.HTTPClient(tqkSend).Post(vTargetUrl, vMPD).ContentAsString;
       finally
         FreeAndNil(vMPD);
       end;
-    end, tqkSend);
+    end,
+    AOnSent, tqkSend);
 end;
 
 procedure TTelegramBot.SendMediaGroup(const AChatId: string; const AMedia: TList<string>;
@@ -557,9 +566,12 @@ begin
       vMessage := nil;
       vJSON := TJSONObject.LoadFromText(AResponse);
       try
-        vResultObj := vJSON.ExtractObject('result');
-        if Assigned(vResultObj) then
-          vMessage := TTelegramMessage.Create(vResultObj);
+        if Assigned(vJSON) then
+        begin
+          vResultObj := vJSON.ExtractObject('result');
+          if Assigned(vResultObj) then
+            vMessage := TTelegramMessage.Create(vResultObj);
+        end;
       finally
         FreeAndNil(vJSON);
       end;
@@ -575,8 +587,11 @@ var
   vPhotos: TJSONArray;
 begin
   Result := '';
+  vJSON := nil;
   try
     vJSON := TJSONObject.LoadFromText(SendPhoto(AChatId, APhotoId));
+    if not Assigned(vJSON) then
+      Exit;
     vResult := vJSON.ExtractObject('result');
     if not Assigned(vResult) then
       Exit;
@@ -690,6 +705,7 @@ var
   vResult, vChat: TJSONObject;
 begin
   Result := nil;
+  vResult := nil;
   vParams := TStringList.Create;
   try
     vParams.Append('chat_id=' + AChat);
@@ -719,9 +735,12 @@ begin
         vFilePath := '';
         vResult := TJSONObject.LoadFromText(AResponse);
         try
-          vRes := vResult.ExtractObject('result');
-          if Assigned(vRes) then
-            vFilePath := vRes.ExtractString('file_path');
+          if Assigned(vResult) then
+          begin
+            vRes := vResult.ExtractObject('result');
+            if Assigned(vRes) then
+              vFilePath := vRes.ExtractString('file_path');
+          end;
         finally
           FreeAndNil(vResult);
         end;
@@ -761,8 +780,8 @@ var
   I: Integer;
 begin
   vTargetUrl := FBotUrl + '/' + AMethodName;
+  vMPD := TMultipartFormData.Create;
   try
-    vMPD := TMultipartFormData.Create;
     for I := 0 to AParams.Count - 1 do
       vMPD.AddField(AParams.Names[I], AParams.Values[AParams.Names[I]]);
     if Assigned(AReplyMarkup) then
@@ -862,6 +881,10 @@ begin
     Exit(tutCallbackQuery);
 end;
 
+procedure TTelegramBot.DoBeforeDispatchUpdate;
+begin
+end;
+
 function TTelegramBot.DoOnMessage(const AMessage: TTelegramMessage): Boolean;
 begin
   Result := False;
@@ -902,8 +925,10 @@ procedure TTelegramBot.Poll;
 var
   vUpdate: TJSONObject;
 begin
+  vUpdate := nil;
   try
     vUpdate := GetUpdate;
+    DoBeforeDispatchUpdate;
     case GetUpdateType(vUpdate) of
       tutMessage:
         ProceedMessage(vUpdate);

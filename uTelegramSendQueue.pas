@@ -171,9 +171,13 @@ begin
     var
       vResult: T;
     begin
-      vResult := AFunc();
-      if Assigned(ACallback) then
-        ACallback(vResult);
+      vResult := Default(T);
+      try
+        vResult := AFunc();
+      finally
+        if Assigned(ACallback) then
+          ACallback(vResult);
+      end;
     end,
     AKind);
 end;
