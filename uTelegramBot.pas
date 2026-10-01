@@ -61,7 +61,8 @@ type
     // Отправить фото напрямую из потока (без временного файла на диске). Забирает владение AStream.
     function SendPhoto(const AChatId: string; const AStream: TStream; const AFileName: string;
       const AText: string = ''; const AReplyMarkup: TTelegramKeyboardMarkup = nil;
-      const ASpoiler: Boolean = False): string; overload;
+      const ASpoiler: Boolean = False; const AOnSent: TProc<string> = nil;
+      const AKind: TTelegramQueueKind = tqkSend): string; overload;
     procedure SendDocument(const AChatId, ADocumentId: string; const AText: string = '';
       const AReplyMarkup: TTelegramKeyboardMarkup = nil);
     procedure SendFile(const AChatId, AFilename: string; const AText: string = '';
@@ -90,7 +91,9 @@ type
       const AReplyMarkup: TTelegramInlineKeyboardMarkup; const AOnSent: TProc<TTelegramMessage>);
 
     procedure EditMessageMedia(const AMessage: TTelegramMessage; const AMedia: string; const ACaption: string = '';
-      const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil);
+      const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil); overload;
+    procedure EditMessageMedia(const AMessage: TTelegramMessage; const AStream: TStream; const AFileName: string;
+      const ACaption: string = ''; const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil); overload;
     procedure EditMessageReplyMarkup(const AMessage: TTelegramMessage;
       const AReplyMarkup: TTelegramInlineKeyboardMarkup);
 
@@ -439,6 +442,64 @@ begin
     end, tqkControl);
 end;
 
+procedure TTelegramBot.EditMessageMedia(const AMessage: TTelegramMessage; const AStream: TStream;
+  const AFileName: string; const ACaption: string = ''; const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil);
+var
+  vTargetUrl, vChatId, vReplyMarkupText, vMediaText, vFileName: string;
+  vMessageId: Integer;
+  vMediaJSON: TJSONObject;
+  vOwnedStream: TStream;
+begin
+  vOwnedStream := AStream;
+  if not Assigned(AMessage) then
+  begin
+    FreeAndNil(vOwnedStream);
+    Exit;
+  end;
+  try
+    vTargetUrl := FBotUrl + '/editMessageMedia';
+    vChatId := AMessage.Chat;
+    vMessageId := AMessage.MessageId;
+    vFileName := AFileName;
+    vReplyMarkupText := '';
+    if Assigned(AReplyMarkup) then
+      vReplyMarkupText := AReplyMarkup.ToString;
+
+    vMediaJSON := TJSONObject.Create;
+    try
+      vMediaJSON.StoreString('type', 'photo');
+      if ACaption <> '' then
+        vMediaJSON.StoreString('caption', ACaption);
+      vMediaJSON.StoreString('media', 'attach://photo');
+      vMediaText := vMediaJSON.ToJSON;
+    finally
+      FreeAndNil(vMediaJSON);
+    end;
+  except
+    FreeAndNil(vOwnedStream);
+    raise;
+  end;
+
+  TTelegramSendQueue.Enqueue(
+    procedure
+    var
+      vMPD: TMultipartFormData;
+    begin
+      vMPD := TMultipartFormData.Create;
+      try
+        vMPD.AddStream('photo', vOwnedStream, True, vFileName);
+        vMPD.AddField('chat_id', vChatId);
+        vMPD.AddField('message_id', IntToStr(vMessageId));
+        vMPD.AddField('media', vMediaText);
+        if vReplyMarkupText <> '' then
+          vMPD.AddField('reply_markup', vReplyMarkupText);
+        TTelegramSendQueue.HTTPClient(tqkControl).Post(vTargetUrl, vMPD);
+      finally
+        FreeAndNil(vMPD);
+      end;
+    end, tqkControl);
+end;
+
 procedure TTelegramBot.EditMessageReplyMarkup(const AMessage: TTelegramMessage;
   const AReplyMarkup: TTelegramInlineKeyboardMarkup);
 var
@@ -650,42 +711,51 @@ begin
 end;
 
 function TTelegramBot.SendPhoto(const AChatId: string; const AStream: TStream; const AFileName, AText: string;
-  const AReplyMarkup: TTelegramKeyboardMarkup; const ASpoiler: Boolean): string;
+  const AReplyMarkup: TTelegramKeyboardMarkup; const ASpoiler: Boolean; const AOnSent: TProc<string>;
+  const AKind: TTelegramQueueKind): string;
 var
   vTargetUrl, vChatId, vFileName, vText, vReplyMarkupText: string;
   vSpoiler: Boolean;
   vOwnedStream: TStream;
+  vKind: TTelegramQueueKind;
 begin
   Result := '';
-  vTargetUrl := FBotUrl + '/sendPhoto';
-  vChatId := AChatId;
-  vFileName := AFileName;
-  vText := AText;
-  vSpoiler := ASpoiler;
   vOwnedStream := AStream;
-  vReplyMarkupText := '';
-  if Assigned(AReplyMarkup) then
-    vReplyMarkupText := AReplyMarkup.ToString;
+  try
+    vTargetUrl := FBotUrl + '/sendPhoto';
+    vChatId := AChatId;
+    vFileName := AFileName;
+    vText := AText;
+    vSpoiler := ASpoiler;
+    vKind := AKind;
+    vReplyMarkupText := '';
+    if Assigned(AReplyMarkup) then
+      vReplyMarkupText := AReplyMarkup.ToString;
+  except
+    FreeAndNil(vOwnedStream);
+    raise;
+  end;
 
-  TTelegramSendQueue.Enqueue(
-    procedure
+  TTelegramSendQueue.EnqueueWithCallback<string>(
+    function: string
     var
       vMPD: TMultipartFormData;
     begin
       vMPD := TMultipartFormData.Create;
       try
+        vMPD.AddStream('photo', vOwnedStream, True, vFileName);
         vMPD.AddField('chat_id', vChatId);
         vMPD.AddField('has_spoiler', BoolToStr(vSpoiler, True));
         if vText <> '' then
           vMPD.AddField('caption', vText);
-        vMPD.AddStream('photo', vOwnedStream, True, vFileName);
         if vReplyMarkupText <> '' then
           vMPD.AddField('reply_markup', vReplyMarkupText);
-        TTelegramSendQueue.HTTPClient(tqkSend).Post(vTargetUrl, vMPD);
+        Result := TTelegramSendQueue.HTTPClient(vKind).Post(vTargetUrl, vMPD).ContentAsString;
       finally
         FreeAndNil(vMPD);
       end;
-    end, tqkSend);
+    end,
+    AOnSent, AKind);
 end;
 
 procedure TTelegramBot.SetBotToken(const Value: string);

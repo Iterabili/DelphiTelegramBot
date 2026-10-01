@@ -14,13 +14,50 @@ type
   TFlowPendingType = (fptNone, fptMessage, fptCallback, fptMessageOrCallback, fptAsyncSend);
   TFlowProc = reference to procedure(const ACtx: TFlowContext);
 
+  TFlowInputKind = (fikText, fikPhoto, fikDocument, fikContact, fikOther);
+  TFlowInputKinds = set of TFlowInputKind;
+
+  TFlowInput = record
+    Kind: TFlowInputKind;
+    Text: string;
+    Photo: string;
+    Document: string;
+    Phone: string;
+    ContactOwner: string;
+    MessageId: Integer;
+  end;
+
+  TFlowInputValidator = reference to function(const AInput: TFlowInput): string;
+
+const
+  cFlowAnyInput = [Low(TFlowInputKind)..High(TFlowInputKind)];
+
+type
+
   TConstructSimpleMenuProcedure = reference to procedure (const ATelegramId: string; const AData: TCallbackData;
     out ACaption: string; out AKeyboard: TTelegramInlineKeyboardMarkup);
+  TConstructListMenuProcedure = reference to procedure (const ATelegramId: string; const AData: TCallbackData;
+    const APage: Integer; out ACaption: string; out AKeyboard: TTelegramInlineKeyboardMarkup);
 
   TButtonsRow = array of string;
   TButtons = array of TButtonsRow;
 
   TTgModalResult = (tmrYes, tmrNo);
+
+  TActionData<T: class> = class
+  private
+    FCallback: TTelegramCallbackQuery;
+    FModalResult: TTgModalResult;
+    FDate: TDateTime;
+    FParams: T;
+  public
+    constructor Create(const AParams: T);
+    destructor Destroy; override;
+    property Callback: TTelegramCallbackQuery read FCallback;
+    property ModalResult: TTgModalResult read FModalResult;
+    property Date: TDateTime read FDate;
+    property Params: T read FParams;
+  end;
 
   TTelegramModuleClass = class of TTelegramModule;
 
@@ -32,8 +69,7 @@ type
     procedure RegisterButton(const AName, ACaption: string; const AURL: string = ''); overload;
     procedure RegisterButton<T: TCallbackData, constructor>(const AName, ACaption: string; const AHandler: TProc<T>; const AACL: TFunc<T, Boolean> = nil); overload;
     procedure RegisterUrlButton<T: TCallbackData, constructor>(const AName, ACaption, AURL: string; const AACL: TFunc<T, Boolean>);
-    procedure RegisterAction(const AName: string); overload;
-    procedure RegisterAction<T: TCallbackData, constructor>(const AName: string; const AHandler: TProc<T, TTgModalResult>); overload;
+    procedure RegisterAction<T: TCallbackData, constructor>(const AName: string; const AHandler: TProc<TActionData<T>>);
     procedure RegisterCommand(const ACommand, ADescription: string); overload;
     procedure RegisterCommand(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>); overload;
     procedure RegisterMessageHandler(const AHandler: TOnTelegramMessage; const APriority: Integer = 100);
@@ -42,14 +78,14 @@ type
     procedure RegisterMenuButton<T: TCallbackData, constructor>(const AMenuName, ACaption: string; const AACL: TFunc<T, Boolean>; const AConstructProcedure: TConstructSimpleMenuProcedure); overload;
     procedure SetMenuContent(const AMenuName, ACaption: string; const AButtons: TButtons; const ABackButton: string = ''); overload;
     procedure SetMenuContent(const AMenuName: string; const AConstructProcedure: TConstructSimpleMenuProcedure; const AButtonCaption: string = ''); overload;
+    procedure SetListMenuContent(const AMenuName: string; const AConstructProcedure: TConstructListMenuProcedure; const AButtonCaption: string = '');
+    procedure RegisterListMenuButton<T: TCallbackData, constructor>(const AMenuName, ACaption: string; const AACL: TFunc<T, Boolean>; const AConstructProcedure: TConstructListMenuProcedure);
   public
     constructor Create(const ABot: TTelegramBotEx); virtual;
     procedure Register; virtual;
     procedure Initialize; virtual;
     function OnMessage(const AMessage: TTelegramMessage): Boolean; virtual;
     function OnCallback(const AAction: string; const AParams: TCallbackData;
-      const ACallback: TTelegramCallbackQuery): Boolean; virtual;
-    function OnAction(const AName: string; const AParams: TCallbackData;
       const ACallback: TTelegramCallbackQuery): Boolean; virtual;
     function OnCommand(const ACommand: string; const AMessage: TTelegramMessage): Boolean; virtual;
     function CanHandleUser(const ATelegramId: string): Boolean; virtual;
@@ -142,15 +178,17 @@ type
 
   TTypedActionHandler = class abstract
   public
-    procedure Execute(const AParams: TCallbackData; const ACallback: TTelegramCallbackQuery); virtual; abstract;
+    procedure Execute(const AParamsData: string; const ACallback: TTelegramCallbackQuery;
+      const AModalResult: TTgModalResult; const ADate: TDateTime); virtual; abstract;
   end;
 
   TTypedActionHandler<T: TCallbackData, constructor> = class(TTypedActionHandler)
   private
-    FHandler: TProc<T, TTgModalResult>;
+    FHandler: TProc<TActionData<T>>;
   public
-    constructor Create(const AHandler: TProc<T, TTgModalResult>);
-    procedure Execute(const AParams: TCallbackData; const ACallback: TTelegramCallbackQuery); override;
+    constructor Create(const AHandler: TProc<TActionData<T>>);
+    procedure Execute(const AParamsData: string; const ACallback: TTelegramCallbackQuery;
+      const AModalResult: TTgModalResult; const ADate: TDateTime); override;
   end;
 
   TFlowContext = class
@@ -178,6 +216,8 @@ type
     function SendPromptResulted(const AText: string; const AReplyMarkup: TTelegramKeyboardMarkup): TTelegramMessage;
     function SendCalendarPromptResulted(const ACurrentDate, AMinDate: TDateTime; const ACancelButton: string;
       const ACancelData: TCallbackData): TTelegramMessage;
+    function AwaitValidated(const APrompt: string; const AKinds: TFlowInputKinds; const AValidator: TFlowInputValidator;
+      const ACancelButton: string; ACancelData: TCallbackData; const ARequestContact: Boolean): TFlowInput;
   public
     constructor Create(const ABot: TTelegramBotEx; const AChatId: string;
       const ASchedulerFiber: Pointer; const AProc: TFlowProc);
@@ -187,16 +227,10 @@ type
     property CancelButtonData: TCallbackData write SetCancelButtonData;
     // Валиден только сразу после Await* (до следующего Await) — сообщение освобождается в ProceedMessage
     property LastMessage: TTelegramMessage read FPendingMessage;
-    function AwaitMessage: TTelegramMessage;
-    function AwaitString(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
+    function Await(const APrompt: string; const AKinds: TFlowInputKinds; const ACancelButton: string = '';
+      ACancelData: TCallbackData = nil; const ARequestContact: Boolean = False): TFlowInput;
     function AwaitInteger(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Integer;
     function AwaitPositiveInteger(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Integer;
-    function AwaitPhoto(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
-    function AwaitDocument(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
-    function AwaitTextOrPhoto(const APrompt: string; out AText, APhoto: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
-    function AwaitPhotoOrDocument(const APrompt: string; out APhoto, ADocument: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
-    function AwaitContact(const APrompt: string; out APhone, AOwner: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
-    function AwaitContactOrText(const APrompt: string; out APhone, AOwner, AText: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
     function AwaitUsername(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
     procedure AwaitTimeRange(const APrompt: string; out AFrom, ATo: TDateTime; const ACancelButton: string = ''; ACancelData: TCallbackData = nil);
     function AwaitButton(const APrompt: string; const AActions, ACaptions: array of string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
@@ -224,6 +258,7 @@ type
     BackButton: string;
     Buttons: TObjectList<TList<TSimpleButton>>;
     ConstructProcedure: TConstructSimpleMenuProcedure;
+    ListConstructProcedure: TConstructListMenuProcedure;
 
     constructor Create(const AId: Integer; const ACaption, ABackButton: string); overload;
     constructor Create(const AId: Integer; const AConstructProcedure: TConstructSimpleMenuProcedure); overload;
@@ -242,7 +277,7 @@ type
     FModules: TObjectList<TTelegramModule>;
     FMessageHandlers: TList<TMessageHandlerEntry>;
     FTypedHandlers: TObjectDictionary<string, TTypedButtonHandler>;
-    FTypedActions: TObjectDictionary<string, TTypedActionHandler>;
+    FTypedActions: TObjectDictionary<Integer, TTypedActionHandler>;
     FSchedulerFiber: Pointer;
     FActiveFlows: TObjectDictionary<string, TFlowState>;
     FPendingSendResults: TThreadList<TPendingSendResult>;
@@ -257,11 +292,12 @@ type
     function NextSendToken: Int64;
     procedure QueueSendResult(const AChatId: string; const AToken: Int64; const AMessage: TTelegramMessage);
     procedure ProcessPendingSendResults;
-    procedure BuildCalendarKeyboard(const ATelegramId: string;
-      const ACurrentDate, AMinDate: TDateTime; const ASelectDateAction, AData,
-      AAcceptBtn, ACancelBtn: string; out ACaption: string;
-      out AKeyboard: TTelegramInlineKeyboardMarkup;
-      const ACancelData: TCallbackData = nil);
+    function RegisterActionId(const AName: string): Integer;
+    procedure InternalSendMenu(const AMessage: TTelegramMessage; const AMenuName, ARecipient: string;
+      const AExtraData: TCallbackData; const ACaption, APhoto: string; const APhotoStream: TStream;
+      const APage: Integer);
+    function ExecuteAction(const AActionId: Integer; const AParamsData: string; const ACallback: TTelegramCallbackQuery;
+      const AModalResult: TTgModalResult; const ADate: TDateTime): Boolean;
     function AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: string; const ACaption: string = ''; const ARow: Integer = -1): Integer; overload;
   protected
     FSimpleButtons: TObjectDictionary<Integer, TSimpleButton>;
@@ -269,7 +305,6 @@ type
     FPersistedButtonIds: TDictionary<string, Integer>;
     FNextButtonId: Integer;
     FButtonIdsChanged: Boolean;
-    FActions: TList<string>;
     FActionsMap: TDictionary<string, Integer>;
     FCommands: TObjectList<TBotCommand>;
     procedure LoadButtonIds;
@@ -282,8 +317,6 @@ type
     procedure SendCommandsToTelegram;
 
     procedure DoInitialize; virtual;
-
-    procedure ExecuteAction(const AName: string; const AParams: TCallbackData; const ACallBack: TTelegramCallbackQuery); virtual;
 
     function HandleModulesMessage(const AMessage: TTelegramMessage): Boolean;
     function HandleModulesCallback(const ACallback: TTelegramCallbackQuery): Boolean;
@@ -310,8 +343,7 @@ type
     procedure SendCalendarResulted(const ATelegramId: string;
       const ACurrentDate, AMinDate: TDateTime; const ACancelButton: string; const ACancelData: TCallbackData;
       const AOnSent: TProc<TTelegramMessage>);
-    procedure RegisterAction(const AName: string); overload;
-    procedure RegisterAction<T: TCallbackData, constructor>(const AName: string; const AHandler: TProc<T, TTgModalResult>); overload;
+    procedure RegisterAction<T: TCallbackData, constructor>(const AName: string; const AHandler: TProc<TActionData<T>>);
     procedure RegisterButton(const AName: string; const ACaption: string; const AURL: string = ''); overload;
     procedure RegisterButton<T: TCallbackData, constructor>(const AName, ACaption: string; const AHandler: TProc<T>; const AACL: TFunc<T, Boolean> = nil); overload;
     procedure RegisterUrlButton<T: TCallbackData, constructor>(const AName, ACaption, AURL: string; const AACL: TFunc<T, Boolean>);
@@ -323,9 +355,22 @@ type
     procedure RegisterMenuButton<T: TCallbackData, constructor>(const AMenuName, ACaption: string; const AACL: TFunc<T, Boolean>; const AConstructProcedure: TConstructSimpleMenuProcedure); overload;
     procedure SetMenuContent(const AMenuName, ACaption: string; const AButtons: TButtons; const ABackButton: string = ''); overload;
     procedure SetMenuContent(const AMenuName: string; const AConstructProcedure: TConstructSimpleMenuProcedure; const AButtonCaption: string = ''); overload;
+    procedure SetListMenuContent(const AMenuName: string; const AConstructProcedure: TConstructListMenuProcedure; const AButtonCaption: string = '');
+    procedure RegisterListMenuButton<T: TCallbackData, constructor>(const AMenuName, ACaption: string; const AACL: TFunc<T, Boolean>; const AConstructProcedure: TConstructListMenuProcedure);
+    function PageBounds(const ACount, APage, APageSize: Integer; out AActualPage, AFirst, ALast: Integer): Integer;
+    procedure AppendPagination(const AKeyboard: TTelegramInlineKeyboardMarkup; const AMenuName: string;
+      const AData: TCallbackData; const APage, APageCount: Integer; const ACounterButton: string = '');
+    procedure SendListMenu(const AMessage: TTelegramMessage; const AMenuName, ARecipient: string;
+      const AData: TCallbackData; const APage: Integer);
+    function IsButtonVisible(const AButton, ATelegramId: string; const AData: TCallbackData): Boolean;
 
+    procedure BuildCalendarKeyboard(const ATelegramId: string;
+      const ACurrentDate, AMinDate: TDateTime; const ASelectDateAction, AData,
+      AAcceptBtn, ACancelBtn: string; out ACaption: string;
+      out AKeyboard: TTelegramInlineKeyboardMarkup;
+      const ACancelData: TCallbackData = nil);
     procedure SendCalendar(const AMessage: TTelegramMessage; const ACurrentDate, AMinDate: TDateTime; const ATelegramId, ASelectDateAction, AData, AAcceptBtn: string;
-      const ACancelBtn: string = ''; const  APhoto: string = '');
+      const ACancelBtn: string = '');
 
 
     function AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: TCallbackData = nil; const ACaption: string = ''; const ARow: Integer = -1; const AStyle: TTelegramButtonStyle = tbsNone): Integer; overload;
@@ -339,6 +384,10 @@ type
     procedure SendMenu(const AMessage: TTelegramMessage; const AMenuName: string; const ARecipient: string = '';
       const AExtraData: TCallbackData = nil; const ACaption: string = ''; const APhoto: string = ''); overload;
     procedure SendMenu<T: TCallbackData, constructor>(const AMessage: TTelegramMessage; const AMenuName, ARecipient: string; const AOwnedExtraData: T; const ACaption: string = ''; const APhoto: string = ''); overload;
+    procedure SendMenu(const AMessage: TTelegramMessage; const AMenuName, ARecipient: string;
+      const AExtraData: TCallbackData; const ACaption: string; const APhotoStream: TStream); overload;
+    procedure SendMenu<T: TCallbackData, constructor>(const AMessage: TTelegramMessage; const AMenuName, ARecipient: string;
+      const AOwnedExtraData: T; const ACaption: string; const APhotoStream: TStream); overload;
 
     procedure Replace(const AMessage: TTelegramMessage; const AChatId, AText: string;
       const AReplyMarkup: TTelegramInlineKeyboardMarkup = nil);
@@ -354,6 +403,9 @@ uses
 
 const
   cButtonIdsFileName = 'telegram_button_ids.txt';
+  cActionIdPrefix = 'action:';
+  cMenuPhotoFileName = 'photo.png';
+  cListPageButton = 'list_page';
 
 function CreateDelimitedList(const ADelimitedText: string; const ADelimiter: Char = ';'): TStrings;
 begin
@@ -532,188 +584,6 @@ begin
   FBot.SendMessage(FChatId, AText);
 end;
 
-function TFlowContext.AwaitMessage: TTelegramMessage;
-begin
-  FPendingType := fptMessage;
-  FPendingMessage := nil;
-  SwitchToScheduler;
-  Result := FPendingMessage;
-end;
-
-function TFlowContext.AwaitString(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
-var
-  vKeyboard: TTelegramInlineKeyboardMarkup;
-  vMsg: TTelegramMessage;
-begin
-  vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
-  FreeAndNil(ACancelData);
-  vMsg := SendPromptResulted(APrompt, vKeyboard);
-  FreeAndNil(vKeyboard);
-  try
-    while True do
-    begin
-      FPendingType := fptMessage;
-      SwitchToScheduler;
-      if FPendingMessage.Text <> '' then
-        Break;
-    end;
-    Result := FPendingMessage.Text;
-  finally
-    FBot.DeleteKeyboard(vMsg);
-    FreeAndNil(vMsg);
-  end;
-end;
-
-function TFlowContext.AwaitInteger(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Integer;
-var
-  vKeyboard: TTelegramInlineKeyboardMarkup;
-  vMsg: TTelegramMessage;
-begin
-  vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
-  FreeAndNil(ACancelData);
-  vMsg := SendPromptResulted(APrompt, vKeyboard);
-  FreeAndNil(vKeyboard);
-  try
-    while True do
-    begin
-      FPendingType := fptMessage;
-      SwitchToScheduler;
-      if TryStrToInt(FPendingMessage.Text, Result) then
-        Break;
-    end;
-  finally
-    FBot.DeleteKeyboard(vMsg);
-    FreeAndNil(vMsg);
-  end;
-end;
-
-function TFlowContext.AwaitPositiveInteger(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Integer;
-var
-  vKeyboard: TTelegramInlineKeyboardMarkup;
-  vMsg: TTelegramMessage;
-begin
-  vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
-  FreeAndNil(ACancelData);
-  vMsg := SendPromptResulted(APrompt, vKeyboard);
-  FreeAndNil(vKeyboard);
-  try
-    while True do
-    begin
-      FPendingType := fptMessage;
-      SwitchToScheduler;
-      if TryStrToInt(FPendingMessage.Text, Result) and (Result > 0) then
-        Break;
-    end;
-  finally
-    FBot.DeleteKeyboard(vMsg);
-    FreeAndNil(vMsg);
-  end;
-end;
-
-function TFlowContext.AwaitPhoto(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
-var
-  vKeyboard: TTelegramInlineKeyboardMarkup;
-  vMsg: TTelegramMessage;
-begin
-  vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
-  FreeAndNil(ACancelData);
-  vMsg := SendPromptResulted(APrompt, vKeyboard);
-  FreeAndNil(vKeyboard);
-  try
-    while True do
-    begin
-      FPendingType := fptMessage;
-      SwitchToScheduler;
-      if FPendingMessage.Photo <> '' then
-        Break;
-    end;
-    Result := FPendingMessage.Photo;
-  finally
-    FBot.DeleteKeyboard(vMsg);
-    FreeAndNil(vMsg);
-  end;
-end;
-
-function TFlowContext.AwaitDocument(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
-var
-  vKeyboard: TTelegramInlineKeyboardMarkup;
-  vMsg: TTelegramMessage;
-begin
-  vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
-  FreeAndNil(ACancelData);
-  vMsg := SendPromptResulted(APrompt, vKeyboard);
-  FreeAndNil(vKeyboard);
-  try
-    while True do
-    begin
-      FPendingType := fptMessage;
-      SwitchToScheduler;
-      if FPendingMessage.Document <> '' then
-        Break;
-    end;
-    Result := FPendingMessage.Document;
-  finally
-    FBot.DeleteKeyboard(vMsg);
-    FreeAndNil(vMsg);
-  end;
-end;
-
-function TFlowContext.AwaitTextOrPhoto(const APrompt: string; out AText, APhoto: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
-var
-  vKeyboard: TTelegramInlineKeyboardMarkup;
-  vMsg: TTelegramMessage;
-begin
-  vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
-  FreeAndNil(ACancelData);
-  vMsg := SendPromptResulted(APrompt, vKeyboard);
-  FreeAndNil(vKeyboard);
-  try
-    while True do
-    begin
-      FPendingType := fptMessage;
-      SwitchToScheduler;
-      if (FPendingMessage.Text <> '') or (FPendingMessage.Photo <> '') then
-      begin
-        AText := FPendingMessage.Text;
-        APhoto := FPendingMessage.Photo;
-        Result := True;
-        Break;
-      end;
-    end;
-  finally
-    FBot.DeleteKeyboard(vMsg);
-    FreeAndNil(vMsg);
-  end;
-end;
-
-function TFlowContext.AwaitPhotoOrDocument(const APrompt: string; out APhoto, ADocument: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
-var
-  vKeyboard: TTelegramInlineKeyboardMarkup;
-  vMsg: TTelegramMessage;
-begin
-  vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
-  FreeAndNil(ACancelData);
-  vMsg := SendPromptResulted(APrompt, vKeyboard);
-  FreeAndNil(vKeyboard);
-  try
-    while True do
-    begin
-      FPendingType := fptMessage;
-      SwitchToScheduler;
-      if (FPendingMessage.Photo <> '') or (FPendingMessage.Document <> '') then
-      begin
-        APhoto := FPendingMessage.Photo;
-        ADocument := FPendingMessage.Document;
-        Result := True;
-        Break;
-      end;
-    end;
-  finally
-    FBot.DeleteKeyboard(vMsg);
-    FreeAndNil(vMsg);
-  end;
-end;
-
 function ExtractDigits(const AText: string): string;
 var
   I: Integer;
@@ -724,173 +594,201 @@ begin
       Result := Result + AText[I];
 end;
 
-function TFlowContext.AwaitContact(const APrompt: string; out APhone, AOwner: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
-var
-  vKeyboardReq: TTelegramReplyKeyboardMarkup;
-  vKeyboard: TTelegramInlineKeyboardMarkup;
-  vMsg: TTelegramMessage;
-  vClearMsg: TTelegramMessage;
-  vEmptyKeyboard: TTelegramReplyKeyboardRemove;
-  vPhone: string;
+function ReadFlowInput(const AMessage: TTelegramMessage): TFlowInput;
 begin
-  vKeyboardReq := TTelegramReplyKeyboardMarkup.Create(
-    [[TTelegramReplyKeyboardButton.Create('Отправить контакт').RequestContact]]);
+  Result.Kind := fikOther;
+  Result.Text := '';
+  Result.Photo := '';
+  Result.Document := '';
+  Result.Phone := '';
+  Result.ContactOwner := '';
+  Result.MessageId := 0;
+  if not Assigned(AMessage) then
+    Exit;
+  Result.MessageId := AMessage.MessageId;
+  Result.Text := Trim(AMessage.Text);
+  Result.Photo := AMessage.Photo;
+  Result.Document := AMessage.Document;
+  if Assigned(AMessage.Contact) then
+  begin
+    Result.Kind := fikContact;
+    Result.Phone := ExtractDigits(AMessage.Contact.Phone);
+    Result.ContactOwner := AMessage.Contact.UserId;
+  end
+  else if Result.Photo <> '' then
+    Result.Kind := fikPhoto
+  else if Result.Document <> '' then
+    Result.Kind := fikDocument
+  else if Result.Text <> '' then
+    Result.Kind := fikText;
+end;
+
+function FlowInputHint(const AKinds: TFlowInputKinds; const ARequestContact: Boolean): string;
+const
+  cKindNames: array[TFlowInputKind] of string = ('текст', 'фото', 'файл', 'контакт', 'другое сообщение');
+var
+  vKind: TFlowInputKind;
+begin
+  if ARequestContact and (AKinds = [fikContact]) then
+    Exit('Нажмите кнопку «Отправить контакт» под полем ввода');
+  Result := '';
+  for vKind := Low(TFlowInputKind) to High(TFlowInputKind) do
+    if vKind in AKinds then
+    begin
+      if Result <> '' then
+        Result := Result + ' или ';
+      Result := Result + cKindNames[vKind];
+    end;
+  Result := 'Ожидается ' + Result;
+end;
+
+function TFlowContext.AwaitValidated(const APrompt: string; const AKinds: TFlowInputKinds;
+  const AValidator: TFlowInputValidator; const ACancelButton: string; ACancelData: TCallbackData;
+  const ARequestContact: Boolean): TFlowInput;
+var
+  vKeyboard: TTelegramInlineKeyboardMarkup;
+  vKeyboardReq: TTelegramReplyKeyboardMarkup;
+  vEmptyKeyboard: TTelegramReplyKeyboardRemove;
+  vMsg, vClearMsg: TTelegramMessage;
+  vError: string;
+begin
+  vMsg := nil;
   vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
   FreeAndNil(ACancelData);
-  vMsg := SendPromptResulted(APrompt, vKeyboardReq);
-  FBot.EditMessageReplyMarkup(vMsg, vKeyboard);
-  FreeAndNil(vKeyboardReq);
-  FreeAndNil(vKeyboard);
+  try
+    if APrompt <> '' then
+      if ARequestContact then
+      begin
+        vKeyboardReq := TTelegramReplyKeyboardMarkup.Create(
+          [[TTelegramReplyKeyboardButton.Create('Отправить контакт').RequestContact]]);
+        try
+          vMsg := SendPromptResulted(APrompt, vKeyboardReq);
+        finally
+          FreeAndNil(vKeyboardReq);
+        end;
+        if Assigned(vMsg) then
+          FBot.EditMessageReplyMarkup(vMsg, vKeyboard);
+      end
+      else
+        vMsg := SendPromptResulted(APrompt, vKeyboard);
+  finally
+    FreeAndNil(vKeyboard);
+  end;
   try
     while True do
     begin
       FPendingType := fptMessage;
+      FPendingMessage := nil;
       SwitchToScheduler;
-      if Assigned(FPendingMessage.Contact) then
+      Result := ReadFlowInput(FPendingMessage);
+      if not (Result.Kind in AKinds) then
       begin
-        APhone := ExtractDigits(FPendingMessage.Contact.Phone);
-        AOwner := FPendingMessage.Contact.UserId;
-        vEmptyKeyboard := TTelegramReplyKeyboardRemove.Create;
+        FBot.SendMessage(FChatId, FlowInputHint(AKinds, ARequestContact));
+        Continue;
+      end;
+      if Assigned(AValidator) then
+      begin
+        vError := AValidator(Result);
+        if vError <> '' then
+        begin
+          FBot.SendMessage(FChatId, vError);
+          Continue;
+        end;
+      end;
+      Break;
+    end;
+    if ARequestContact then
+    begin
+      vEmptyKeyboard := TTelegramReplyKeyboardRemove.Create;
+      try
         vClearMsg := SendPromptResulted('clear', vEmptyKeyboard);
         FBot.DeleteMessage(vClearMsg);
         FreeAndNil(vClearMsg);
+      finally
         FreeAndNil(vEmptyKeyboard);
-        Result := True;
-        Break;
-      end
-      else
-      begin
-        vPhone := ExtractDigits(FPendingMessage.Text);
-        if Length(vPhone) >= 10 then
-        begin
-          APhone := vPhone;
-          AOwner := '';
-          Result := True;
-          Break;
-        end
-        else
-          FBot.SendMessage(FChatId,
-            'Не удалось распознать номер телефона в сообщении. Введите номер цифрами или отправьте контакт.');
       end;
     end;
   finally
-    FBot.DeleteKeyboard(vMsg);
+    if Assigned(vMsg) then
+      FBot.DeleteKeyboard(vMsg);
     FreeAndNil(vMsg);
   end;
 end;
 
-function TFlowContext.AwaitContactOrText(const APrompt: string; out APhone, AOwner, AText: string;
-  const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Boolean;
-var
-  vKeyboardReq: TTelegramReplyKeyboardMarkup;
-  vKeyboard: TTelegramInlineKeyboardMarkup;
-  vMsg: TTelegramMessage;
-  vClearMsg: TTelegramMessage;
-  vEmptyKeyboard: TTelegramReplyKeyboardRemove;
-  vPhone: string;
+function TFlowContext.Await(const APrompt: string; const AKinds: TFlowInputKinds; const ACancelButton: string = '';
+  ACancelData: TCallbackData = nil; const ARequestContact: Boolean = False): TFlowInput;
 begin
-  APhone := '';
-  AOwner := '';
-  AText := '';
-  vKeyboardReq := TTelegramReplyKeyboardMarkup.Create(
-    [[TTelegramReplyKeyboardButton.Create('Отправить контакт').RequestContact]]);
-  vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
-  FreeAndNil(ACancelData);
-  vMsg := SendPromptResulted(APrompt, vKeyboardReq);
-  FBot.EditMessageReplyMarkup(vMsg, vKeyboard);
-  FreeAndNil(vKeyboardReq);
-  FreeAndNil(vKeyboard);
-  try
-    FPendingType := fptMessage;
-    SwitchToScheduler;
-    if Assigned(FPendingMessage.Contact) then
+  Result := AwaitValidated(APrompt, AKinds, nil, ACancelButton, ACancelData, ARequestContact);
+end;
+
+function TFlowContext.AwaitInteger(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Integer;
+begin
+  Result := StrToInt(AwaitValidated(APrompt, [fikText],
+    function(const AInput: TFlowInput): string
+    var
+      vValue: Integer;
     begin
-      APhone := ExtractDigits(FPendingMessage.Contact.Phone);
-      AOwner := FPendingMessage.Contact.UserId;
-      vEmptyKeyboard := TTelegramReplyKeyboardRemove.Create;
-      vClearMsg := SendPromptResulted('clear', vEmptyKeyboard);
-      FBot.DeleteMessage(vClearMsg);
-      FreeAndNil(vClearMsg);
-      FreeAndNil(vEmptyKeyboard);
-      Result := True;
-    end
-    else
+      Result := '';
+      if not TryStrToInt(AInput.Text, vValue) then
+        Result := 'Введите целое число';
+    end, ACancelButton, ACancelData, False).Text);
+end;
+
+function TFlowContext.AwaitPositiveInteger(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Integer;
+begin
+  Result := StrToInt(AwaitValidated(APrompt, [fikText],
+    function(const AInput: TFlowInput): string
+    var
+      vValue: Integer;
     begin
-      vPhone := ExtractDigits(FPendingMessage.Text);
-      if Length(vPhone) >= 10 then
-      begin
-        APhone := vPhone;
-        Result := True;
-      end
-      else
-      begin
-        AText := Trim(FPendingMessage.Text);
-        Result := False;
-      end;
-    end;
-  finally
-    FBot.DeleteKeyboard(vMsg);
-    FreeAndNil(vMsg);
-  end;
+      Result := '';
+      if not TryStrToInt(AInput.Text, vValue) or (vValue <= 0) then
+        Result := 'Введите целое число больше нуля';
+    end, ACancelButton, ACancelData, False).Text);
 end;
 
 function TFlowContext.AwaitUsername(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
 var
-  vKeyboard: TTelegramInlineKeyboardMarkup;
-  vMsg: TTelegramMessage;
+  vText: string;
 begin
-  vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
-  FreeAndNil(ACancelData);
-  vMsg := SendPromptResulted(APrompt, vKeyboard);
-  FreeAndNil(vKeyboard);
-  try
-    while True do
+  vText := AwaitValidated(APrompt, [fikText],
+    function(const AInput: TFlowInput): string
     begin
-      FPendingType := fptMessage;
-      SwitchToScheduler;
-      if (Length(FPendingMessage.Text) > 1) and (FPendingMessage.Text[1] = '@') then
-      begin
-        Result := Copy(FPendingMessage.Text, 2, Length(FPendingMessage.Text) - 1);
-        Break;
-      end;
-    end;
+      Result := '';
+      if (Length(AInput.Text) < 2) or (AInput.Text[1] <> '@') then
+        Result := 'Введите username, начиная с @';
+    end, ACancelButton, ACancelData, False).Text;
+  Result := Copy(vText, 2, Length(vText) - 1);
+end;
+
+function TryParseTimeRange(const AText: string; out AFrom, ATo: TDateTime): Boolean;
+var
+  vTimeRange: TStrings;
+begin
+  vTimeRange := CreateDelimitedList(AText, '-');
+  try
+    Result := (vTimeRange.Count = 2) and
+      TryStrToTime(NormalizeTimeString(vTimeRange[0]), AFrom) and
+      TryStrToTime(NormalizeTimeString(vTimeRange[1]), ATo);
   finally
-    FBot.DeleteKeyboard(vMsg);
-    FreeAndNil(vMsg);
+    FreeAndNil(vTimeRange);
   end;
 end;
 
 procedure TFlowContext.AwaitTimeRange(const APrompt: string; out AFrom, ATo: TDateTime; const ACancelButton: string = ''; ACancelData: TCallbackData = nil);
 var
-  vKeyboard: TTelegramInlineKeyboardMarkup;
-  vMsg: TTelegramMessage;
-  vTimeRange: TStrings;
+  vText: string;
 begin
-  vKeyboard := BuildCancelKeyboard(GetEffectiveCancelButton(ACancelButton), GetEffectiveCancelData(ACancelData));
-  FreeAndNil(ACancelData);
-  vMsg := SendPromptResulted(APrompt, vKeyboard);
-  FreeAndNil(vKeyboard);
-  try
-    while True do
+  vText := AwaitValidated(APrompt, [fikText],
+    function(const AInput: TFlowInput): string
+    var
+      vFrom, vTo: TDateTime;
     begin
-      FPendingType := fptMessage;
-      SwitchToScheduler;
-      if FPendingMessage.Text = '' then
-        Continue;
-      vTimeRange := CreateDelimitedList(FPendingMessage.Text, '-');
-      try
-        if (vTimeRange.Count = 2) and
-           TryStrToTime(NormalizeTimeString(vTimeRange[0]), AFrom) and
-           TryStrToTime(NormalizeTimeString(vTimeRange[1]), ATo) then
-          Break;
-      finally
-        FreeAndNil(vTimeRange);
-      end;
-    end;
-  finally
-    FBot.DeleteKeyboard(vMsg);
-    FreeAndNil(vMsg);
-  end;
+      Result := '';
+      if not TryParseTimeRange(AInput.Text, vFrom, vTo) then
+        Result := 'Введите время в формате 17-19 или 15:30-18:30';
+    end, ACancelButton, ACancelData, False).Text;
+  TryParseTimeRange(vText, AFrom, ATo);
 end;
 
 function TFlowContext.AwaitButton(const APrompt: string;
@@ -969,9 +867,9 @@ begin
         Result := '';
         Break;
       end
-      else if Assigned(FPendingMessage) and (FPendingMessage.Text <> '') then
+      else if Assigned(FPendingMessage) and (Trim(FPendingMessage.Text) <> '') then
       begin
-        Result := FPendingMessage.Text;
+        Result := Trim(FPendingMessage.Text);
         Break;
       end;
     end;
@@ -1164,7 +1062,7 @@ begin
     if not (vState.Context.FPendingType in [fptCallback, fptMessageOrCallback]) then Exit;
 
     // Навигация по календарю — не прерываем Fiber, идёт в обычный роутинг
-    if vButton = 'calendar_date' then Exit;
+    if (vButton = 'calendar_date') or (vButton = cListPageButton) then Exit;
 
     // Кнопка отмены для fptCallback (AwaitButton / AwaitDate) → тихо завершаем, кнопка идёт дальше
     if (vState.Context.FCancelButton <> '') and (vButton = vState.Context.FCancelButton) then
@@ -1274,7 +1172,7 @@ begin
   RegisterButton('calendar_date', 'Выбор дня в календаре');
   RegisterButton('flow_accept_date', 'Подтвердить дату');
   RegisterButton('flow_enter_text', 'Ввести вручную');
-  RegisterAction('FlowCalendarSelect');
+  RegisterButton(cListPageButton, 'Страница списка');
 
   RegisterDoOnMessage(TryResumeFlowWithMessage);
   RegisterDoOnCallbackQuery(TryResumeFlowWithCallback);
@@ -1303,9 +1201,9 @@ end;
 function TTelegramBotEx.InternalExecuteCalbackAction(const ACallback: TTelegramCallbackQuery): Boolean;
 var
   vBId, vAId, I: Integer;
-  vButton, vAction: string;
-  vInitialCount: Integer;
-  vPhoto, vData, vCancelBtn: string;
+  vButton: string;
+  vModalResult: TTgModalResult;
+  vData, vCancelBtn: string;
   vCallbackData: TCallbackData;
   vExtraData: TCallbackData;
   vTypedHandler: TTypedButtonHandler;
@@ -1340,36 +1238,57 @@ begin
 
     if (vButton = 'confirm') or (vButton = 'reject') then
     begin
-      vAId := vCallbackData.GetInteger(1);
-      vAction := FActions[vAId];
-      ExecuteAction(vAction, vCallbackData, ACallback);
+      if vButton = 'confirm' then
+        vModalResult := tmrYes
+      else
+        vModalResult := tmrNo;
+      vData := '';
+      for I := 2 to vCallbackData.Count - 1 do
+      begin
+        if vData <> '' then
+          vData := vData + ' ';
+        vData := vData + vCallbackData.GetString(I);
+      end;
+      ExecuteAction(vCallbackData.GetInteger(1, -1), vData, ACallback, vModalResult, 0);
     end
     else if vButton = 'calendar_date' then
     begin
-      vAId := vCallbackData.GetInteger(1);
-      vAction := FActions[vAId];
-      vInitialCount := vCallbackData.Count;
-      ExecuteAction(vAction, vCallbackData, ACallback);
-
-      vPhoto := '';
-      if vCallbackData.Count > vInitialCount then
-        vPhoto := vCallbackData.GetString(vInitialCount);
-
-      vCancelBtn := '';
-      if vCallbackData.GetInteger(5) <> -1 then
-        vCancelBtn := FSimpleButtons[vCallbackData.GetInteger(5)].Name;
+      vAId := vCallbackData.GetInteger(1, -1);
 
       vData := '';
-      for I := 6 to vInitialCount - 1 do
+      for I := 6 to vCallbackData.Count - 1 do
       begin
         if vData <> '' then
           vData := vData + ' ';
         vData := vData + vCallbackData.GetString(I);
       end;
 
-      SendCalendar(ACallback.AtMessage, StrToDate(vCallbackData.GetString(2)), StrToDate(vCallbackData.GetString(3)),
-        ACallback.From.Id, FActions[vCallbackData.GetInteger(1)], vData,
-        FSimpleButtons[vCallbackData.GetInteger(4)].Name, vCancelBtn, vPhoto);
+      if not ExecuteAction(vAId, vData, ACallback, tmrYes, StrToDate(vCallbackData.GetString(2))) then
+      begin
+        vCancelBtn := '';
+        if FSimpleButtons.ContainsKey(vCallbackData.GetInteger(5, -1)) then
+          vCancelBtn := FSimpleButtons[vCallbackData.GetInteger(5)].Name;
+
+        SendCalendar(ACallback.AtMessage, StrToDate(vCallbackData.GetString(2)), StrToDate(vCallbackData.GetString(3)),
+          ACallback.From.Id, '', vData, FSimpleButtons[vCallbackData.GetInteger(4)].Name, vCancelBtn);
+      end;
+    end
+    else if vButton = cListPageButton then
+    begin
+      vAId := vCallbackData.GetInteger(1, -1);
+      if FSimpleButtons.ContainsKey(vAId) and FSimpleMenus.ContainsKey(FSimpleButtons[vAId].Name) then
+      begin
+        vExtraData := TCallbackData.Create;
+        try
+          for I := 3 to vCallbackData.Count - 1 do
+            vExtraData.Add(vCallbackData.GetString(I));
+          if CheckButtonAdd(FSimpleButtons[vAId].Name, ACallback.From.Id, vExtraData.ToString) then
+            InternalSendMenu(ACallback.AtMessage, FSimpleButtons[vAId].Name, ACallback.From.Id, vExtraData, '', '',
+              nil, vCallbackData.GetInteger(2, 0));
+        finally
+          FreeAndNil(vExtraData);
+        end;
+      end;
     end
     else if FSimpleMenus.ContainsKey(vButton) then
     begin
@@ -1488,14 +1407,13 @@ begin
   FNextButtonId := 0;
   FButtonIdsChanged := False;
   FSimpleMenus := TObjectDictionary<string, TSimpleMenu>.Create([doOwnsValues]);
-  FActions := TList<string>.Create;
   FActionsMap := TDictionary<string, Integer>.Create;
   FActiveFlows := TObjectDictionary<string, TFlowState>.Create([doOwnsValues]);
   FPendingSendResults := TThreadList<TPendingSendResult>.Create;
   FPendingSendResults.Duplicates := dupAccept;
   FNextSendToken := 0;
   FTypedHandlers := TObjectDictionary<string, TTypedButtonHandler>.Create([doOwnsValues]);
-  FTypedActions := TObjectDictionary<string, TTypedActionHandler>.Create([doOwnsValues]);
+  FTypedActions := TObjectDictionary<Integer, TTypedActionHandler>.Create([doOwnsValues]);
   FSchedulerFiber := nil;
   FCommands := TObjectList<TBotCommand>.Create;
   FOnMessageProcedures := TList<TOnTelegramMessage>.Create;
@@ -1516,7 +1434,6 @@ begin
   FreeAndNil(FSimpleMenus);
   FreeAndNil(FButtonsMap);
   FreeAndNil(FPersistedButtonIds);
-  FreeAndNil(FActions);
   FreeAndNil(FActionsMap);
   FreeAndNil(FCommands);
   FreeAndNil(FOnMessageProcedures);
@@ -1590,19 +1507,14 @@ begin
       Exit(False);
 end;
 
-procedure TTelegramBotEx.ExecuteAction(const AName: string; const AParams: TCallbackData; const ACallBack: TTelegramCallbackQuery);
+function TTelegramBotEx.ExecuteAction(const AActionId: Integer; const AParamsData: string;
+  const ACallback: TTelegramCallbackQuery; const AModalResult: TTgModalResult; const ADate: TDateTime): Boolean;
 var
-  vModule: TTelegramModule;
   vTypedAction: TTypedActionHandler;
 begin
-  if FTypedActions.TryGetValue(AName, vTypedAction) then
-  begin
-    vTypedAction.Execute(AParams, ACallBack);
-    Exit;
-  end;
-  for vModule in FModules do
-    if vModule.OnAction(AName, AParams, ACallBack) then
-      Exit;
+  Result := FTypedActions.TryGetValue(AActionId, vTypedAction);
+  if Result then
+    vTypedAction.Execute(AParamsData, ACallback, AModalResult, ADate);
 end;
 
 function TTelegramBotEx.HandleModulesMessage(const AMessage: TTelegramMessage): Boolean;
@@ -1731,21 +1643,25 @@ begin
   FModuleClasses.Add(AClass);
 end;
 
-procedure TTelegramBotEx.RegisterAction(const AName: string);
+function TTelegramBotEx.RegisterActionId(const AName: string): Integer;
 var
-  vId: integer;
+  vKey: string;
 begin
-  vId := FActions.Add(AName);
-  FActionsMap.Add(AName, vId);
+  Assert(not FActionsMap.ContainsKey(AName), 'Action ' + AName + ' is already presented');
+  vKey := cActionIdPrefix + AName;
+  if not FPersistedButtonIds.TryGetValue(vKey, Result) then
+  begin
+    Result := FNextButtonId;
+    Inc(FNextButtonId);
+    FPersistedButtonIds.Add(vKey, Result);
+    FButtonIdsChanged := True;
+  end;
+  FActionsMap.Add(AName, Result);
 end;
 
-procedure TTelegramBotEx.RegisterAction<T>(const AName: string; const AHandler: TProc<T, TTgModalResult>);
-var
-  vTypedAction: TTypedActionHandler<T>;
+procedure TTelegramBotEx.RegisterAction<T>(const AName: string; const AHandler: TProc<TActionData<T>>);
 begin
-  RegisterAction(AName);
-  vTypedAction := TTypedActionHandler<T>.Create(AHandler);
-  FTypedActions.Add(AName, vTypedAction);
+  FTypedActions.Add(RegisterActionId(AName), TTypedActionHandler<T>.Create(AHandler));
 end;
 
 procedure TTelegramBotEx.LoadButtonIds;
@@ -1896,6 +1812,101 @@ begin
   FSimpleMenus.Add(AMenuName, TSimpleMenu.Create(FSimpleMenus.Count, AConstructProcedure));
 end;
 
+procedure TTelegramBotEx.SetListMenuContent(const AMenuName: string;
+  const AConstructProcedure: TConstructListMenuProcedure; const AButtonCaption: string = '');
+var
+  vMenu: TSimpleMenu;
+begin
+  Assert(Assigned(AConstructProcedure), 'Функция создания должна быть!');
+  vMenu := TSimpleMenu.Create(FSimpleMenus.Count, TConstructSimpleMenuProcedure(nil));
+  vMenu.ListConstructProcedure := AConstructProcedure;
+  FSimpleMenus.Add(AMenuName, vMenu);
+  if (AButtonCaption <> '') and not FButtonsMap.ContainsKey(AMenuName) then
+    RegisterButton(AMenuName, AButtonCaption);
+end;
+
+procedure TTelegramBotEx.RegisterListMenuButton<T>(const AMenuName, ACaption: string; const AACL: TFunc<T, Boolean>;
+  const AConstructProcedure: TConstructListMenuProcedure);
+var
+  vMenu: TSimpleMenu;
+begin
+  Assert(Assigned(AConstructProcedure), 'Функция создания должна быть!');
+  if not FButtonsMap.ContainsKey(AMenuName) then
+    RegisterButton(AMenuName, ACaption);
+  FTypedHandlers.Add(AMenuName, TTypedButtonHandler<T>.Create(nil, AACL));
+  vMenu := TSimpleMenu.Create(FSimpleMenus.Count, TConstructSimpleMenuProcedure(nil));
+  vMenu.ListConstructProcedure := AConstructProcedure;
+  FSimpleMenus.Add(AMenuName, vMenu);
+end;
+
+function TTelegramBotEx.PageBounds(const ACount, APage, APageSize: Integer;
+  out AActualPage, AFirst, ALast: Integer): Integer;
+begin
+  Result := Max(1, (ACount + APageSize - 1) div APageSize);
+  AActualPage := EnsureRange(APage, 0, Result - 1);
+  AFirst := AActualPage * APageSize;
+  ALast := Min(ACount, AFirst + APageSize) - 1;
+end;
+
+procedure TTelegramBotEx.AppendPagination(const AKeyboard: TTelegramInlineKeyboardMarkup; const AMenuName: string;
+  const AData: TCallbackData; const APage, APageCount: Integer; const ACounterButton: string = '');
+var
+  vPrefix, vTail, vCounter: string;
+  vRow: Integer;
+
+  function PageData(const APageNumber: Integer): string;
+  begin
+    Result := vPrefix + ' ' + IntToStr(APageNumber);
+    if vTail <> '' then
+      Result := Result + ' ' + vTail;
+  end;
+
+begin
+  if APageCount <= 1 then
+    Exit;
+  vPrefix := IntToStr(FButtonsMap.Items[AMenuName].Id);
+  vTail := '';
+  if Assigned(AData) then
+    vTail := AData.ToString;
+  vCounter := Format('%d / %d', [APage + 1, APageCount]);
+  vRow := -1;
+  if APage > 0 then
+  begin
+    vRow := AppendKeyboard(AKeyboard, cListPageButton, PageData(0), '|◀');
+    AppendKeyboard(AKeyboard, cListPageButton, PageData(APage - 1), '◀', vRow);
+  end;
+  if ACounterButton <> '' then
+    vRow := AppendKeyboard(AKeyboard, ACounterButton, vTail, vCounter, vRow)
+  else if vRow = -1 then
+    vRow := AKeyboard.AddButton(vCounter, '-1')
+  else
+    AKeyboard.AddButton(vCounter, '-1', vRow);
+  if APage < APageCount - 1 then
+  begin
+    AppendKeyboard(AKeyboard, cListPageButton, PageData(APage + 1), '▶', vRow);
+    AppendKeyboard(AKeyboard, cListPageButton, PageData(APageCount - 1), '▶|', vRow);
+  end;
+end;
+
+procedure TTelegramBotEx.SendListMenu(const AMessage: TTelegramMessage; const AMenuName, ARecipient: string;
+  const AData: TCallbackData; const APage: Integer);
+begin
+  InternalSendMenu(AMessage, AMenuName, ARecipient, AData, '', '', nil, APage);
+end;
+
+function TTelegramBotEx.IsButtonVisible(const AButton, ATelegramId: string; const AData: TCallbackData): Boolean;
+var
+  vDataStr: string;
+begin
+  vDataStr := '';
+  if Assigned(AData) then
+  begin
+    AData.Serialize;
+    vDataStr := AData.ToString;
+  end;
+  Result := CheckButtonAdd(AButton, ATelegramId, vDataStr);
+end;
+
 procedure TTelegramBotEx.SetMenuContent(const AMenuName: string;
   const AConstructProcedure: TConstructSimpleMenuProcedure; const AButtonCaption: string = '');
 begin
@@ -1952,7 +1963,9 @@ begin
   vCancelBtnId := -1;
   if ACancelBtn <> '' then
     vCancelBtnId := FButtonsMap.Items[ACancelBtn].Id;
-  vActionId := FActionsMap.Items[ASelectDateAction];
+  vActionId := -1;
+  if ASelectDateAction <> '' then
+    vActionId := FActionsMap.Items[ASelectDateAction];
 
   vData := Format('%d %d %s %s %d %d %s', [vBtnId, vActionId, '%s', DateToStr(AMinDate), vAcceptBtnId, vCancelBtnId, AData]);
 
@@ -1980,7 +1993,7 @@ begin
 end;
 
 procedure TTelegramBotEx.SendCalendar(const AMessage: TTelegramMessage; const ACurrentDate, AMinDate: TDateTime; const ATelegramId, ASelectDateAction, AData, AAcceptBtn: string;
-  const ACancelBtn: string = ''; const  APhoto: string = '');
+  const ACancelBtn: string = '');
 var
   vCaption: string;
   vKeyboard: TTelegramInlineKeyboardMarkup;
@@ -1988,20 +2001,10 @@ begin
   BuildCalendarKeyboard(ATelegramId, ACurrentDate, AMinDate, ASelectDateAction,
     AData, AAcceptBtn, ACancelBtn, vCaption, vKeyboard);
   try
-    if APhoto = '' then
-    begin
-      if Assigned(AMessage) then
-        EditMessageText(AMessage, vCaption, vKeyboard)
-      else
-        SendMessage(ATelegramId, vCaption, vKeyboard);
-    end
+    if Assigned(AMessage) then
+      EditMessageText(AMessage, vCaption, vKeyboard)
     else
-    begin
-      if Assigned(AMessage) then
-        EditMessageMedia(AMessage, APhoto, vCaption, vKeyboard)
-      else
-        SendPhoto(ATelegramId, APhoto, vCaption, vKeyboard);
-    end;
+      SendMessage(ATelegramId, vCaption, vKeyboard);
   finally
     FreeAndNil(vKeyboard);
   end;
@@ -2014,7 +2017,7 @@ var
   vCaption: string;
   vKeyboard: TTelegramInlineKeyboardMarkup;
 begin
-  BuildCalendarKeyboard(ATelegramId, ACurrentDate, AMinDate, 'FlowCalendarSelect',
+  BuildCalendarKeyboard(ATelegramId, ACurrentDate, AMinDate, '',
     '', 'flow_accept_date', ACancelButton, vCaption, vKeyboard, ACancelData);
   try
     SendMessageResulted(ATelegramId, vCaption, vKeyboard, AOnSent);
@@ -2042,8 +2045,8 @@ begin
     DeleteMessage(AMessage);
   Assert(FActionsMap.TryGetValue(AAction, vActionId), 'Action <'+AAction+'> not found');
   vKeyboard := TTelegramInlineKeyboardMarkup.Create;
-  AppendKeyboard(vKeyboard, 'confirm', IntToStr(vActionId) + ' ' + IntToStr(Integer(tmrYes)) + ' ' + vDataStr);
-  AppendKeyboard(vKeyboard, 'reject', IntToStr(vActionId) + ' ' + IntToStr(Integer(tmrNo)) + ' ' + vDataStr);
+  AppendKeyboard(vKeyboard, 'confirm', IntToStr(vActionId) + ' ' + vDataStr);
+  AppendKeyboard(vKeyboard, 'reject', IntToStr(vActionId) + ' ' + vDataStr);
   if APhoto <> '' then
     SendPhoto(ATelegramId, APhoto, AText, vKeyboard)
   else if ADocument <> '' then
@@ -2074,8 +2077,8 @@ begin
   Assert(FActionsMap.TryGetValue(AAction, vActionId), 'Action <'+AAction+'> not found');
   vKeyboard := TTelegramInlineKeyboardMarkup.Create;
   try
-    AppendKeyboard(vKeyboard, 'confirm', IntToStr(vActionId) + ' ' + IntToStr(Integer(tmrYes)) + ' ' + vDataStr);
-    AppendKeyboard(vKeyboard, 'reject', IntToStr(vActionId) + ' ' + IntToStr(Integer(tmrNo)) + ' ' + vDataStr);
+    AppendKeyboard(vKeyboard, 'confirm', IntToStr(vActionId) + ' ' + vDataStr);
+    AppendKeyboard(vKeyboard, 'reject', IntToStr(vActionId) + ' ' + vDataStr);
     SendMessageResulted(ATelegramId, AText, vKeyboard, AOnSent);
   finally
     FreeAndNil(vKeyboard);
@@ -2084,6 +2087,19 @@ end;
 
 procedure TTelegramBotEx.SendMenu(const AMessage: TTelegramMessage;
   const AMenuName, ARecipient: string; const AExtraData: TCallbackData; const ACaption, APhoto: string);
+begin
+  InternalSendMenu(AMessage, AMenuName, ARecipient, AExtraData, ACaption, APhoto, nil, 0);
+end;
+
+procedure TTelegramBotEx.SendMenu(const AMessage: TTelegramMessage; const AMenuName, ARecipient: string;
+  const AExtraData: TCallbackData; const ACaption: string; const APhotoStream: TStream);
+begin
+  InternalSendMenu(AMessage, AMenuName, ARecipient, AExtraData, ACaption, '', APhotoStream, 0);
+end;
+
+procedure TTelegramBotEx.InternalSendMenu(const AMessage: TTelegramMessage; const AMenuName, ARecipient: string;
+  const AExtraData: TCallbackData; const ACaption, APhoto: string; const APhotoStream: TStream;
+  const APage: Integer);
 var
   vMenu: TSimpleMenu;
   vKeyboard: TTelegramInlineKeyboardMarkup;
@@ -2095,22 +2111,30 @@ var
   vRecipient: string;
   vData: TCallbackData;
   vOwnData: Boolean;
+  vPhotoStream, vSendStream: TStream;
+  vHasPhoto: Boolean;
 begin
-  Assert(FSimpleMenus.TryGetValue(AMenuName, vMenu), 'Menu ' + AMenuName + ' not found');
-
-  vRecipient := ARecipient;
-  if (vRecipient = '') and Assigned(AMessage) then
-    vRecipient := AMessage.Chat;
-
-  vOwnData := not Assigned(AExtraData);
-  if vOwnData then
-    vData := TCallbackData.Create
-  else
-    vData := AExtraData;
-
-  vKeyboard := TTelegramInlineKeyboardMarkup.Create;
+  vPhotoStream := APhotoStream;
+  vOwnData := False;
+  vData := nil;
+  vKeyboard := nil;
   try
-    if Assigned(vMenu.ConstructProcedure) then
+    Assert(FSimpleMenus.TryGetValue(AMenuName, vMenu), 'Menu ' + AMenuName + ' not found');
+
+    vRecipient := ARecipient;
+    if (vRecipient = '') and Assigned(AMessage) then
+      vRecipient := AMessage.Chat;
+
+    vOwnData := not Assigned(AExtraData);
+    if vOwnData then
+      vData := TCallbackData.Create
+    else
+      vData := AExtraData;
+
+    vKeyboard := TTelegramInlineKeyboardMarkup.Create;
+    if Assigned(vMenu.ListConstructProcedure) then
+      vMenu.ListConstructProcedure(vRecipient, vData, APage, vCaption, vKeyboard)
+    else if Assigned(vMenu.ConstructProcedure) then
       vMenu.ConstructProcedure(vRecipient, vData, vCaption, vKeyboard)
     else
     begin
@@ -2128,31 +2152,40 @@ begin
       if ACaption <> '' then
         vCaption := ACaption;
     end;
-    if Assigned(AMessage)then
+    vHasPhoto := (APhoto <> '') or Assigned(vPhotoStream);
+    if Assigned(AMessage) and ((AMessage.Photo <> '') or vHasPhoto) then
     begin
-      if (AMessage.Photo <> '') then
+      if not vHasPhoto then
       begin
-        if APhoto = '' then
-        begin
-          DeleteMessage(AMessage);
-          SendMessage(vRecipient, vCaption, vKeyboard);
-        end
-        else
-          EditMessageMedia(AMessage, APhoto, vCaption, vKeyboard);
+        DeleteMessage(AMessage);
+        SendMessage(vRecipient, vCaption, vKeyboard);
       end
-      else if APhoto = '' then
-        EditMessageText(AMessage, vCaption, vKeyboard)
+      else if Assigned(vPhotoStream) then
+      begin
+        vSendStream := vPhotoStream;
+        vPhotoStream := nil;
+        EditMessageMedia(AMessage, vSendStream, cMenuPhotoFileName, vCaption, vKeyboard);
+      end
       else
         EditMessageMedia(AMessage, APhoto, vCaption, vKeyboard);
     end
-    else if APhoto = '' then
+    else if Assigned(AMessage) then
+      EditMessageText(AMessage, vCaption, vKeyboard)
+    else if not vHasPhoto then
       SendMessage(vRecipient, vCaption, vKeyboard)
+    else if Assigned(vPhotoStream) then
+    begin
+      vSendStream := vPhotoStream;
+      vPhotoStream := nil;
+      SendPhoto(vRecipient, vSendStream, cMenuPhotoFileName, vCaption, vKeyboard);
+    end
     else
       SendPhoto(vRecipient, APhoto, vCaption, vKeyboard);
   finally
     if vOwnData then
       FreeAndNil(vData);
     FreeAndNil(vKeyboard);
+    FreeAndNil(vPhotoStream);
   end;
 end;
 
@@ -2162,6 +2195,17 @@ begin
   try
     AOwnedExtraData.Serialize;
     SendMenu(AMessage, AMenuName, ARecipient, TCallbackData(AOwnedExtraData), ACaption, APhoto);
+  finally
+    AOwnedExtraData.Free;
+  end;
+end;
+
+procedure TTelegramBotEx.SendMenu<T>(const AMessage: TTelegramMessage; const AMenuName, ARecipient: string;
+  const AOwnedExtraData: T; const ACaption: string; const APhotoStream: TStream);
+begin
+  try
+    AOwnedExtraData.Serialize;
+    InternalSendMenu(AMessage, AMenuName, ARecipient, TCallbackData(AOwnedExtraData), ACaption, '', APhotoStream, 0);
   finally
     AOwnedExtraData.Free;
   end;
@@ -2211,12 +2255,6 @@ begin
   Result := False;
 end;
 
-function TTelegramModule.OnAction(const AName: string; const AParams: TCallbackData;
-  const ACallback: TTelegramCallbackQuery): Boolean;
-begin
-  Result := False;
-end;
-
 function TTelegramModule.OnCommand(const ACommand: string; const AMessage: TTelegramMessage): Boolean;
 begin
   Result := False;
@@ -2247,12 +2285,7 @@ begin
   FBot.RegisterUrlButton<T>(AName, ACaption, AURL, AACL);
 end;
 
-procedure TTelegramModule.RegisterAction(const AName: string);
-begin
-  FBot.RegisterAction(AName);
-end;
-
-procedure TTelegramModule.RegisterAction<T>(const AName: string; const AHandler: TProc<T, TTgModalResult>);
+procedure TTelegramModule.RegisterAction<T>(const AName: string; const AHandler: TProc<TActionData<T>>);
 begin
   FBot.RegisterAction<T>(AName, AHandler);
 end;
@@ -2280,6 +2313,17 @@ end;
 procedure TTelegramModule.SetMenuContent(const AMenuName, ACaption: string; const AButtons: TButtons; const ABackButton: string = '');
 begin
   FBot.SetMenuContent(AMenuName, ACaption, AButtons, ABackButton);
+end;
+
+procedure TTelegramModule.SetListMenuContent(const AMenuName: string; const AConstructProcedure: TConstructListMenuProcedure; const AButtonCaption: string = '');
+begin
+  FBot.SetListMenuContent(AMenuName, AConstructProcedure, AButtonCaption);
+end;
+
+procedure TTelegramModule.RegisterListMenuButton<T>(const AMenuName, ACaption: string; const AACL: TFunc<T, Boolean>;
+  const AConstructProcedure: TConstructListMenuProcedure);
+begin
+  FBot.RegisterListMenuButton<T>(AMenuName, ACaption, AACL, AConstructProcedure);
 end;
 
 procedure TTelegramModule.SetMenuContent(const AMenuName: string; const AConstructProcedure: TConstructSimpleMenuProcedure; const AButtonCaption: string = '');
@@ -2351,31 +2395,46 @@ end;
 
 { TTypedActionHandler<T> }
 
-constructor TTypedActionHandler<T>.Create(const AHandler: TProc<T, TTgModalResult>);
+constructor TTypedActionHandler<T>.Create(const AHandler: TProc<TActionData<T>>);
 begin
   FHandler := AHandler;
 end;
 
-procedure TTypedActionHandler<T>.Execute(const AParams: TCallbackData; const ACallback: TTelegramCallbackQuery);
+procedure TTypedActionHandler<T>.Execute(const AParamsData: string; const ACallback: TTelegramCallbackQuery;
+  const AModalResult: TTgModalResult; const ADate: TDateTime);
 var
   vData: T;
   vShifted: string;
-  vModalResult: TTgModalResult;
-  I: Integer;
+  vAction: TActionData<T>;
 begin
-  vModalResult := TTgModalResult(AParams.GetInteger(2));
   vShifted := '0';
-  for I := 3 to AParams.Count - 1 do
-    vShifted := vShifted + ' ' + AParams.GetString(I);
+  if AParamsData <> '' then
+    vShifted := vShifted + ' ' + AParamsData;
   vData := T.Create;
+  vAction := TActionData<T>.Create(vData);
   try
     vData.LoadData(vShifted);
     vData.FCallback := ACallback;
     vData.Parse;
-    FHandler(vData, vModalResult);
+    vAction.FCallback := ACallback;
+    vAction.FModalResult := AModalResult;
+    vAction.FDate := ADate;
+    FHandler(vAction);
   finally
-    FreeAndNil(vData);
+    FreeAndNil(vAction);
   end;
+end;
+
+constructor TActionData<T>.Create(const AParams: T);
+begin
+  inherited Create;
+  FParams := AParams;
+end;
+
+destructor TActionData<T>.Destroy;
+begin
+  FParams.Free;
+  inherited;
 end;
 
 { TCallbackData }
