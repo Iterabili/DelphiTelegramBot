@@ -29,11 +29,6 @@ type
 
   TFlowInputValidator = reference to function(const AInput: TFlowInput): string;
 
-const
-  cFlowAnyInput = [Low(TFlowInputKind)..High(TFlowInputKind)];
-
-type
-
   TConstructSimpleMenuProcedure = reference to procedure (const ATelegramId: string; const AData: TCallbackData;
     out ACaption: string; out AKeyboard: TTelegramInlineKeyboardMarkup);
   TConstructListMenuProcedure = reference to procedure (const ATelegramId: string; const AData: TCallbackData;
@@ -99,6 +94,7 @@ type
     Name: string;
     Caption: string;
     URL: string;
+    URLProvider: TFunc<string>;
 
     constructor Create(const AId: Integer; const AName, ACaption: string; const AURL: string);
   end;
@@ -347,6 +343,7 @@ type
     procedure RegisterButton(const AName: string; const ACaption: string; const AURL: string = ''); overload;
     procedure RegisterButton<T: TCallbackData, constructor>(const AName, ACaption: string; const AHandler: TProc<T>; const AACL: TFunc<T, Boolean> = nil); overload;
     procedure RegisterUrlButton<T: TCallbackData, constructor>(const AName, ACaption, AURL: string; const AACL: TFunc<T, Boolean>);
+    procedure SetButtonUrlProvider(const AName: string; const AProvider: TFunc<string>);
     procedure RegisterCommand(const ACommand, ADescription: string); overload;
     procedure RegisterCommand(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>); overload;
 
@@ -395,6 +392,9 @@ type
 
 function CreateDelimitedList(const ADelimitedText: string; const ADelimiter: Char = ';'): TStrings;
 function NormalizeTimeString(const AText: string): string;
+
+const
+  cFlowAnyInput = [Low(TFlowInputKind)..High(TFlowInputKind)];
 
 implementation
 
@@ -1313,7 +1313,7 @@ end;
 function TTelegramBotEx.AppendKeyboard(const AKeyboard: TTelegramInlineKeyboardMarkup; const AButton: string; const AData: TCallbackData = nil; const ACaption: string = ''; const ARow: Integer = -1; const AStyle: TTelegramButtonStyle = tbsNone): Integer;
 var
   vButton: TSimpleButton;
-  vCaption: string;
+  vCaption, vUrl: string;
   vCallbackData: TCallbackData;
   vOwnsData: Boolean;
 begin
@@ -1324,6 +1324,14 @@ begin
   vCaption := ACaption;
   if vCaption = '' then
     vCaption := vButton.Caption;
+
+  if Assigned(vButton.URLProvider) then
+  begin
+    vUrl := vButton.URLProvider();
+    if vUrl <> '' then
+      Result := AKeyboard.AddUrlButton(vCaption, vUrl, ARow);
+    Exit;
+  end;
 
   if vButton.URL <> '' then
   begin
@@ -1743,6 +1751,12 @@ begin
   RegisterButton(AName, ACaption, AURL);
   vTypedHandler := TTypedButtonHandler<T>.Create(nil, AACL);
   FTypedHandlers.Add(AName, vTypedHandler);
+end;
+
+procedure TTelegramBotEx.SetButtonUrlProvider(const AName: string; const AProvider: TFunc<string>);
+begin
+  Assert(FButtonsMap.ContainsKey(AName), 'Button ' + AName + ' not found');
+  FButtonsMap[AName].URLProvider := AProvider;
 end;
 
 procedure TTelegramBotEx.RegisterCommand(const ACommand, ADescription: string);
