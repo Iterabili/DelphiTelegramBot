@@ -5,6 +5,9 @@ interface
 uses
   uTelegramTypes, uTelegramBot, Generics.Collections, Classes, SysUtils;
 
+const
+  cDefaultCommandPriority = 100;
+
 type
   TCallbackData = class;  // Forward declaration
   TTelegramBotEx = class;  // Forward declaration
@@ -66,7 +69,8 @@ type
     procedure RegisterUrlButton<T: TCallbackData, constructor>(const AName, ACaption, AURL: string; const AACL: TFunc<T, Boolean>);
     procedure RegisterAction<T: TCallbackData, constructor>(const AName: string; const AHandler: TProc<TActionData<T>>);
     procedure RegisterCommand(const ACommand, ADescription: string); overload;
-    procedure RegisterCommand(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>); overload;
+    procedure RegisterCommand(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>;
+      const APriority: Integer = cDefaultCommandPriority); overload;
     procedure RegisterMessageHandler(const AHandler: TOnTelegramMessage; const APriority: Integer = 100);
     procedure RegisterMenuButton(const AMenuName, ACaption: string); overload;
     procedure RegisterMenuButton<T: TCallbackData, constructor>(const AMenuName, ACaption: string; const AACL: TFunc<T, Boolean>); overload;
@@ -109,8 +113,10 @@ type
     Command: string;
     Description: string;
     Handler: TFunc<TTelegramMessage, Boolean>;
+    Priority: Integer;
 
-    constructor Create(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean> = nil);
+    constructor Create(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean> = nil;
+      const APriority: Integer = cDefaultCommandPriority);
   end;
 
   TCallbackData = class
@@ -199,6 +205,7 @@ type
     FPendingDate: TDateTime;
     FPendingSendToken: Int64;
     FAwaiterMessageId: Integer;
+    FLastPromptMessageId: Integer;
     FCancelled: Boolean;
     FCompleted: Boolean;
     FProc: TFlowProc;
@@ -229,7 +236,10 @@ type
     function AwaitPositiveInteger(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): Integer;
     function AwaitUsername(const APrompt: string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
     procedure AwaitTimeRange(const APrompt: string; out AFrom, ATo: TDateTime; const ACancelButton: string = ''; ACancelData: TCallbackData = nil);
-    function AwaitButton(const APrompt: string; const AActions, ACaptions: array of string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
+    function AwaitButton(const APrompt: string; const AActions, ACaptions: array of string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string; overload;
+    function AwaitButton(const APrompt: string; const AActions, ACaptions: array of string;
+      const AStyles: array of TTelegramButtonStyle; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string; overload;
+    property LastPromptMessageId: Integer read FLastPromptMessageId;
     function AwaitStringOrSkip(const APrompt, ASkipButton, ASkipCaption: string): string;
     function AwaitDate(const ACurrentDate, AMinDate: TDateTime; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): TDateTime;
     procedure Send(const AText: string);
@@ -345,7 +355,8 @@ type
     procedure RegisterUrlButton<T: TCallbackData, constructor>(const AName, ACaption, AURL: string; const AACL: TFunc<T, Boolean>);
     procedure SetButtonUrlProvider(const AName: string; const AProvider: TFunc<string>);
     procedure RegisterCommand(const ACommand, ADescription: string); overload;
-    procedure RegisterCommand(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>); overload;
+    procedure RegisterCommand(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>;
+      const APriority: Integer = cDefaultCommandPriority); overload;
 
     procedure RegisterMenuButton(const AMenuName, ACaption: string); overload;
     procedure RegisterMenuButton<T: TCallbackData, constructor>(const AMenuName, ACaption: string; const AACL: TFunc<T, Boolean>); overload;
@@ -497,6 +508,7 @@ begin
   FPendingAction := '';
   FPendingDate := 0;
   FAwaiterMessageId := -1;
+  FLastPromptMessageId := -1;
   FCancelled := False;
   FCompleted := False;
   FProc := AProc;
@@ -794,11 +806,24 @@ end;
 function TFlowContext.AwaitButton(const APrompt: string;
   const AActions, ACaptions: array of string; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
 var
+  vStyles: TArray<TTelegramButtonStyle>;
+  I: Integer;
+begin
+  SetLength(vStyles, Length(AActions));
+  for I := 0 to Length(vStyles) - 1 do
+    vStyles[I] := tbsNone;
+  Result := AwaitButton(APrompt, AActions, ACaptions, vStyles, ACancelButton, ACancelData);
+end;
+
+function TFlowContext.AwaitButton(const APrompt: string; const AActions, ACaptions: array of string;
+  const AStyles: array of TTelegramButtonStyle; const ACancelButton: string = ''; ACancelData: TCallbackData = nil): string;
+var
   vKeyboard: TTelegramInlineKeyboardMarkup;
   vMsg: TTelegramMessage;
   vData: TCallbackData;
   vEffectiveCancel: string;
   vSavedCancelButton: string;
+  vStyle: TTelegramButtonStyle;
   I: Integer;
 begin
   vEffectiveCancel := GetEffectiveCancelButton(ACancelButton);
@@ -808,7 +833,10 @@ begin
     for I := 0 to Length(AActions) - 1 do
     begin
       vData.Clear;
-      FBot.AppendKeyboard(vKeyboard, AActions[I], vData, ACaptions[I]);
+      vStyle := tbsNone;
+      if I < Length(AStyles) then
+        vStyle := AStyles[I];
+      FBot.AppendKeyboard(vKeyboard, AActions[I], vData, ACaptions[I], -1, vStyle);
     end;
     if vEffectiveCancel <> '' then
       FBot.AppendKeyboard(vKeyboard, vEffectiveCancel, GetEffectiveCancelData(ACancelData), 'Назад');
@@ -825,6 +853,7 @@ begin
       FAwaiterMessageId := vMsg.MessageId
     else
       FAwaiterMessageId := -1;
+    FLastPromptMessageId := FAwaiterMessageId;
     FPendingType := fptCallback;
     FPendingAction := '';
     SwitchToScheduler;
@@ -1764,11 +1793,12 @@ begin
   RegisterCommand(ACommand, ADescription, nil);
 end;
 
-procedure TTelegramBotEx.RegisterCommand(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>);
+procedure TTelegramBotEx.RegisterCommand(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>;
+  const APriority: Integer);
 var
   vCommand: TBotCommand;
 begin
-  vCommand := TBotCommand.Create(ACommand, ADescription, AHandler);
+  vCommand := TBotCommand.Create(ACommand, ADescription, AHandler, APriority);
   FCommands.Add(vCommand);
 end;
 
@@ -1776,15 +1806,25 @@ procedure TTelegramBotEx.SendCommandsToTelegram;
 var
   vCommands: TStringList;
   vSeen: TDictionary<string, Boolean>;
+  vOrdered: TList<TBotCommand>;
   vCommand: TBotCommand;
+  I: Integer;
 begin
   if FCommands.Count = 0 then
     Exit;
 
   vCommands := TStringList.Create;
   vSeen := TDictionary<string, Boolean>.Create;
+  vOrdered := TList<TBotCommand>.Create;
   try
     for vCommand in FCommands do
+    begin
+      I := vOrdered.Count;
+      while (I > 0) and (vOrdered[I - 1].Priority > vCommand.Priority) do
+        Dec(I);
+      vOrdered.Insert(I, vCommand);
+    end;
+    for vCommand in vOrdered do
       if not vSeen.ContainsKey(vCommand.Command) then
       begin
         vSeen.Add(vCommand.Command, True);
@@ -1792,6 +1832,7 @@ begin
       end;
     SetMyCommands(vCommands);
   finally
+    FreeAndNil(vOrdered);
     FreeAndNil(vSeen);
     FreeAndNil(vCommands);
   end;
@@ -2309,9 +2350,10 @@ begin
   FBot.RegisterCommand(ACommand, ADescription);
 end;
 
-procedure TTelegramModule.RegisterCommand(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>);
+procedure TTelegramModule.RegisterCommand(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>;
+  const APriority: Integer);
 begin
-  FBot.RegisterCommand(ACommand, ADescription, AHandler);
+  FBot.RegisterCommand(ACommand, ADescription, AHandler, APriority);
 end;
 
 procedure TTelegramModule.RegisterMessageHandler(const AHandler: TOnTelegramMessage; const APriority: Integer);
@@ -2368,11 +2410,13 @@ end;
 
 { TBotCommand }
 
-constructor TBotCommand.Create(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>);
+constructor TBotCommand.Create(const ACommand, ADescription: string; const AHandler: TFunc<TTelegramMessage, Boolean>;
+  const APriority: Integer);
 begin
   Command := ACommand;
   Description := ADescription;
   Handler := AHandler;
+  Priority := APriority;
 end;
 
 { TTypedButtonHandler<T> }
